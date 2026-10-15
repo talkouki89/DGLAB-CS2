@@ -1,16 +1,21 @@
 class PayloadParser:
     def parse_payload(self, payload, gamestate_manager):
-        change_flags = {}
+        # Parse provider information
+        # provider.steamid 就是「執行遊戲的那個人」，也就是自己。
+        # 死亡觀戰時 player 區塊會變成別人的資料，要靠這個值分辨。
+        if "provider" in payload:
+            provider_info = payload["provider"]
+            if isinstance(provider_info, dict) and "steamid" in provider_info:
+                gamestate_manager.gamestate.provider_steamid = str(
+                    provider_info["steamid"]
+                )
+
         # Parse round information
         if "round" in payload and "phase" in payload["round"]:
-            roundchanged = False
             if payload["round"]["phase"] != gamestate_manager.gamestate.round_phase:
                 gamestate_manager.gamestate.update_round_phase(
                     payload["round"]["phase"]
                 )
-                roundchanged = True
-            if payload["round"]["phase"] != "live" and not roundchanged:
-                return None
 
         # Parse map information
         if "map" in payload:
@@ -74,6 +79,10 @@ class PayloadParser:
                 gamestate_manager.gamestate.player.observer_slot = player_info[
                     "observer_slot"
                 ]
+            if "spectarget" in player_info:
+                gamestate_manager.gamestate.player.spectarget = str(
+                    player_info["spectarget"] or ""
+                )
             if "activity" in player_info:
                 gamestate_manager.gamestate.player.activity = player_info["activity"]
 
@@ -83,6 +92,7 @@ class PayloadParser:
                     gamestate_manager.gamestate.player.state.health = state_info[
                         "health"
                     ]
+                    gamestate_manager.gamestate.player.state.health_known = True
                 if "armor" in state_info:
                     gamestate_manager.gamestate.player.state.armor = state_info["armor"]
                 if "helmet" in state_info:
@@ -111,6 +121,10 @@ class PayloadParser:
                     gamestate_manager.gamestate.player.state.round_killhs = state_info[
                         "round_killhs"
                     ]
+                if "round_totaldmg" in state_info:
+                    gamestate_manager.gamestate.player.state.round_totaldmg = state_info[
+                        "round_totaldmg"
+                    ]
                 if "equip_value" in state_info:
                     gamestate_manager.gamestate.player.state.equip_value = state_info[
                         "equip_value"
@@ -118,8 +132,6 @@ class PayloadParser:
 
             if "weapons" in player_info:
                 gamestate_manager.gamestate.player.weapons = player_info["weapons"]
-                if player_info["weapons"] != gamestate_manager.gamestate.player.weapons:
-                    gamestate_manager.gamestate.player.weapons = player_info["weapons"]
 
             if "match_stats" in player_info:
                 match_stats = player_info["match_stats"]
@@ -127,6 +139,9 @@ class PayloadParser:
                     gamestate_manager.gamestate.player.match_stats.kills = match_stats[
                         "kills"
                     ]
+                    # 比賽累計擊殺數是單調遞增的，比每回合歸零的 round_kills
+                    # 可靠得多，所以拿它當擊殺偵測的主要來源。
+                    gamestate_manager.gamestate.player.match_stats.kills_known = True
                 if "assists" in match_stats:
                     gamestate_manager.gamestate.player.match_stats.assists = (
                         match_stats["assists"]

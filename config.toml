@@ -1,9 +1,196 @@
-# Config file for DGLAB-CS2
+# ===========================================================================
+#  DGLAB-CS2 設定檔（郊狼 3.0 / DG-LAB Socket 連線）
+#  修改後直接重新啟動程式即可，不需要重新編譯。
+# ===========================================================================
 
+# 是否輸出 debug 等級的記錄（包含每一則 Socket 訊息）
 debug = false
 
+
+# --------------------------------------------------------------- CS2 GSI ---
+[gsi]
+# 必須和 gamestate_integration_dglab.cfg 裡的 uri 與 auth.token 一致
+host = "127.0.0.1"
+port = 3000
+# 設成空字串 "" 代表「接受任何來源的 GSI 資料」。
+# 只有在需要排除 token 問題、而且確定本機沒有其他程式在用這個埠時才這樣設。
+token = "DGLAB"
+
+
+# ----------------------------------------------------------------- Socket ---
+[socket]
+# DG-LAB Socket 中繼服務端。官方位址就是這一個，正常不需要改。
+# 也可以填自己架設的服務端，例如 "ws://192.168.1.10:9999"
+uri = "wss://ws.dungeon-lab.cn/"
+
+# 連上服務端之後，等多久還沒拿到 clientId 就視為失敗（秒）
+register_timeout = 20.0
+
+# 終端機上的 QR code 要不要反相。
+# 深色背景的終端機請保持 true；白底終端機改成 false。
+qr_invert = true
+
+# QR code 圖片的輸出路徑（相對於本程式），留空 = 不輸出圖片。
+# 圖片一定是用標準極性（白底黑方塊），掃不到終端機的圖時可以改掃這張。
+qr_png = "qrcode.png"
+
+# 產生 QR code 圖片之後自動用預設圖片檢視器打開
+qr_open = true
+
+
+# ----------------------------------------------------------------- 郊狼 ---
 [dglab]
+# 要輸出波形的通道：A、B 或 AB（AB 會兩條通道一起輸出）
+channels = "A"
+
+# 【安全上限】強度絕對不會超過這個值（0 ~ 200）。
+# 預設值 80 的計算：base 20 + 掉 100 滴血 × 0.2 = 40，再乘燃燒加成 1.2 = 48
+max_strength = 80
+
+# 若 DG-LAB App 上設定的強度上限比 max_strength 低，是否以 App 的為準。
+# 保持 true 可以避免「一直送超出上限的值，卻怎麼按都沒反應」。
+respect_app_limit = true
+
+# 控制迴圈的「最大」檢查間隔（秒）。
+#
+# 平常是事件驅動：一收到 CS2 的資料就立刻處理，所以這個值只是保底
+# （安全看門狗、畫面狀態刷新）。想讓反應更快可以調小，但沒什麼必要。
+poll_interval = 0.1
+
+# 超過幾秒沒收到 CS2 資料就把強度歸零（遊戲關掉後的安全機制）。
+# 0 = 停用。cfg 檔的 heartbeat 設為 10 秒，所以 30 秒是很安全的門檻。
+stop_when_no_data_seconds = 30.0
+
+# --- 血量 → 強度 ---
+
+# 基礎強度：滿血時的強度
 base_strength = 20
+
+# 每掉一滴血增加多少強度，建議 0.2 ~ 1
 strength_per_hp = 0.2
+
+# 滿血時是否仍然電擊。false = 滿血完全不輸出
 keep_strength_while_not_injured = true
-burning_multiplier = 0.2 # 20% more strength if burning
+
+# 燃燒彈加成：0.2 代表燒到最滿時，強度再多 20%
+burning_multiplier = 0.2
+
+# --- 功能一：強度疊加（死亡增加、擊殺降低）---
+
+# 是否啟用強度疊加
+stack_enabled = true
+
+# 每次陣亡累加的強度
+stack_death_gain = 5
+
+# 每次擊殺扣回的強度
+stack_kill_reduction = 2
+
+# 疊加值的上下限（可以設負的，代表擊殺可以扣到比基礎值更低）
+stack_min = 0
+stack_max = 30
+
+# --- 功能二：受擊同步電擊 ---
+
+# continuous = 一直輸出，強度隨血量變化（原本的行為）
+# hit_only   = 平常完全不出力，只有受擊後的一小段時間輸出
+output_mode = "continuous"
+
+# 受擊後持續輸出幾秒（hit_only 模式下決定輸出時間，兩種模式都會影響加成時間窗）
+hit_duration = 0.35
+
+# 受擊時間窗內額外增加的強度（0 = 不加成）
+hit_boost = 0
+
+# --- 功能三：被電擊槍（Zeus x27）電到 ---
+
+# GSI 不會告訴我們傷害是誰造成的，所以只能用「單次掉了多少血」判斷。
+# 電擊槍是一擊必殺（傷害 500），所以門檻預設 100，也就是「一次就被打到 0 血」。
+# 注意：AWP 爆頭、近戰背刺之類的一擊必殺也會符合，GSI 沒辦法再細分。
+taser_enabled = true
+
+# 觸發時把強度拉到這個值（仍然受 max_strength 限制，不會超過安全上限）
+taser_strength = 50
+
+# 持續幾秒
+taser_duration = 1.0
+
+# 單次掉血達到這個值才算（0 = 停用判斷）
+taser_min_damage = 100
+
+# --- 功能四：死亡後過幾秒把強度歸零 ---
+
+# 死亡後先維持原來的強度一小段時間，超過設定的秒數就強制歸零，
+# 直到復活為止。避免陣亡後躺在那裡一直被電。
+death_stop_enabled = true
+
+# 死亡後幾秒歸零
+death_stop_delay = 5.0
+
+
+# ----------------------------------------------------------------- 波形 ---
+[dglab.wave]
+# 波形預設集：
+#   steady      - 連續穩定輸出，與舊版 2.0 的 set_wave_sync(1, 9, 20) 等效（預設）
+#   slow        - 與舊版 2.0 的 (5, 95, 20) 等效，一下一下的
+#   breathe     - 強度在 40 ~ 100 之間來回，500ms 一個循環
+#   pulse       - 100ms 開、100ms 關
+#   ramp        - 波形頻率由低到高緩緩上升
+#   app_breathe - 官方 App 內建「呼吸」波形
+#   app_tide    - 官方 App 內建「潮汐」波形
+#   custom      - 使用下面的 custom_samples
+preset = "steady"
+
+# preset = "custom" 時使用。每一項是 [波形頻率, 波形強度]：
+#   波形頻率：輸出單元的時長，單位 ms，範圍 10 ~ 1000
+#             （10ms ≈ 100Hz 脈衝、100ms ≈ 10Hz、1000ms ≈ 1Hz）
+#   波形強度：0 ~ 100，越大脈衝越寬、感受越強
+# 每個取樣點佔用 25ms，把取樣點接成循環就會持續變化。
+custom_samples = [
+    [10, 100],
+    [10, 100],
+    [10, 40],
+    [10, 40],
+]
+
+
+# --------------------------------------------------------------- Discord ---
+[discord]
+# 是否在 Discord 個人檔案上顯示「目前在做什麼」。
+#
+# 下面的 Application ID 與圖片都已經預設成本專案的，所以只要把 enabled
+# 改成 true 就能用，不需要自己建應用程式。
+#
+# 想換成自己的品牌時：
+#   1. 打開 https://discord.com/developers/applications
+#   2. New Application → 隨便取個名字（例如 DGLAB-CS2）
+#   3. 左邊選 General Information → 複製 Application ID 貼到下面
+#   4. 左邊選 Rich Presence → Art Assets → 上傳圖片並取名
+#   5. 回到程式按「讀取圖片清單」，從下拉選單挑圖片
+enabled = false
+
+# Discord 應用程式的 Application ID（純數字）
+client_id = "1560163564839510086"
+
+# 最短更新間隔（秒）。Discord 對狀態更新有次數限制（20 秒內 5 次），
+# 所以不建議低於 4 秒。
+update_interval = 5.0
+
+# 要顯示哪些資訊（顯示的內容：第一行是遊玩狀態，第二行是這些數值）
+show_strength = true
+show_health = true
+show_stack = true
+
+# --- 圖片 ---
+#
+# 這裡填的是「asset key」——圖片在 Discord 開發者頁面上的名字，
+# 不是檔案路徑。填好 client_id 之後按介面上的「讀取圖片清單」，
+# 程式會自動列出你上傳過的圖片讓你用下拉選單挑。
+#
+# 剛上傳的圖片可能要等幾分鐘才會生效。
+large_image = "dglad-logo"
+large_text = "DGLAB-CS2"
+
+small_image = "cs2-logo"
+small_text = "Counter-Strike 2"
+

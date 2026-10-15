@@ -1,0 +1,8 @@
+# DG-LAB Socket（WebSocket）連線。
+# 程式對 websockets 新舊版的 API 差異做了相容處理，所以不限版本上限。
+websockets>=12
+
+# QR code：qrcode 負責產生矩陣（必要）；Pillow 只用來輸出 PNG（可選）。
+# 沒有 qrcode 時程式仍可執行，只是會把配對連結直接印出來讓你貼到手機上。
+qrcode>=7.4
+pillow>=10
