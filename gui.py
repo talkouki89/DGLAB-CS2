@@ -54,6 +54,7 @@ from engine import (
     app_directory,
     default_config_path,
     describe_wave,
+    resolve_app_path,
 )
 from strength import MODE_CONTINUOUS, MODE_HIT_ONLY, OutputGate, StrengthPolicy, StrengthStack
 
@@ -79,6 +80,19 @@ CONNECTION_FIELDS = (
 
 #: Discord 開發者頁面
 DISCORD_DEVELOPERS_URL = "https://discord.com/developers/applications"
+
+#: 本專案在 GitHub 上的位置
+PROJECT_URL = "https://github.com/talkouki89/DGLAB-CS2"
+
+#: QR code 圖片的預設檔名（設定裡的 qr_png 是空的時候用）
+DEFAULT_QR_IMAGE = "qrcode.png"
+
+#: 參數分頁的可視高度。欄位再多也是這個高度，不夠就自己滾 ——
+#: 這樣視窗大小不會被欄位數量撐開。
+SETTINGS_HEIGHT = 230
+
+#: 說明文字的初始換行寬度（之後會依實際寬度自動調整）
+HINT_WRAPLENGTH = 250
 
 #: 每隔幾個 tick 重新檢查一次 GSI 設定（tick 預設 150ms，所以大約 10 秒）
 GSI_CHECK_EVERY_TICKS = 66
@@ -180,7 +194,7 @@ FIELDS: tuple[Field, ...] = (
         "discord_enabled",
         "啟用 Discord 顯示",
         "bool",
-        "在 Discord 個人檔案上顯示目前強度與遊玩狀態",
+        "在 Discord 個人檔案顯示目前狀態",
     ),
     Field(
         "Discord",
@@ -497,6 +511,75 @@ class StatusCell:
         self.value.configure(text=text)
 
 
+class ScrollableFrame(ttk.Frame):
+    """可以上下滾動的容器。
+
+    參數分頁最多有 10 個欄位，全部攤開會把整個視窗撐得很高。這裡固定一個
+    高度，內容超過就自己滾 —— 視窗大小就不會被欄位數量牽著走。
+
+    滑鼠滾輪要綁在**每一個子元件**上：Tk 的 Enter／Leave 是看指標底下的元件，
+    只綁在 canvas 上的話，指標移到輸入框上面時滾輪就會失效。
+    """
+
+    def __init__(self, parent: tk.Widget, *, height: int = 280, **kwargs) -> None:
+        super().__init__(parent, **kwargs)
+        self.canvas = tk.Canvas(self, height=height, highlightthickness=0)
+        self.scrollbar = ttk.Scrollbar(
+            self, orient="vertical", command=self.canvas.yview
+        )
+        self.body = ttk.Frame(self.canvas)
+        self._window = self.canvas.create_window((0, 0), window=self.body, anchor="nw")
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.scrollbar.grid(row=0, column=1, sticky="ns")
+
+        self.body.bind("<Configure>", self._on_body_configure)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+
+    # ------------------------------------------------------------ 內部
+
+    def _on_body_configure(self, _event=None) -> None:
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        self._sync_scrollbar()
+
+    def _on_canvas_configure(self, event) -> None:
+        self.canvas.itemconfigure(self._window, width=event.width)
+        self._sync_scrollbar()
+
+    def _sync_scrollbar(self) -> None:
+        """內容比視窗矮時就把捲軸藏起來。"""
+        needed = self.body.winfo_reqheight()
+        visible = self.canvas.winfo_height()
+        if needed > visible:
+            self.scrollbar.grid()
+        else:
+            self.scrollbar.grid_remove()
+            self.canvas.yview_moveto(0)
+
+    def _on_wheel(self, event) -> None:
+        if self.body.winfo_reqheight() <= self.canvas.winfo_height():
+            return
+        self.canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+
+    # ------------------------------------------------------------ 對外
+
+    def bind_wheel_to_children(self) -> None:
+        """把所有子元件的滾輪事件接到這個捲動區（建立完內容後呼叫）。"""
+
+        def walk(widget: tk.Widget) -> None:
+            widget.bind("<MouseWheel>", self._on_wheel, add="+")
+            for child in widget.winfo_children():
+                walk(child)
+
+        walk(self.body)
+
+    def scroll_to_top(self) -> None:
+        self.canvas.yview_moveto(0)
+
+
 # ------------------------------------------------------------------- 介面
 
 
@@ -703,32 +786,38 @@ class DglabApp:
         bar = ttk.Frame(self.root, padding=(12, 10, 12, 0))
         bar.grid(row=1, column=0, sticky="ew")
 
-        self.start_button = ttk.Button(bar, text="\u25b6 開始", command=self._on_start, width=12)
+        self.start_button = ttk.Button(bar, text="\u25b6 開始", command=self._on_start, width=10)
         self.start_button.grid(row=0, column=0, padx=(0, 6))
         self.pause_button = ttk.Button(
-            bar, text="\u23f8 暫停並歸零", command=self._on_pause, width=16, state="disabled"
+            bar, text="\u23f8 暫停並歸零", command=self._on_pause, width=14, state="disabled"
         )
         self.pause_button.grid(row=0, column=1, padx=6)
         self.stop_button = ttk.Button(
-            bar, text="\u23f9 結束", command=self._on_stop, width=10, state="disabled"
+            bar, text="\u23f9 結束", command=self._on_stop, width=9, state="disabled"
         )
         self.stop_button.grid(row=0, column=2, padx=6)
-        ttk.Button(bar, text="疊加歸零", command=self._on_reset_stack, width=10).grid(
+        ttk.Button(bar, text="疊加歸零", command=self._on_reset_stack, width=9).grid(
             row=0, column=3, padx=6
         )
         self.dry_run_var = tk.BooleanVar(value=self.dry_run)
         self.dry_run_check = ttk.Checkbutton(
-            bar, text="模擬模式（不連服務端）", variable=self.dry_run_var, command=self._on_toggle_dry_run
+            bar, text="模擬模式", variable=self.dry_run_var, command=self._on_toggle_dry_run
         )
-        self.dry_run_check.grid(row=0, column=4, padx=(18, 8))
+        self.dry_run_check.grid(row=0, column=4, padx=(14, 6))
 
-        ttk.Separator(bar, orient="vertical").grid(row=0, column=5, sticky="ns", padx=8)
+        ttk.Separator(bar, orient="vertical").grid(row=0, column=5, sticky="ns", padx=6)
         ttk.Button(
-            bar, text="\u2699 安裝 GSI 設定", command=self._on_install_cfg, width=18
+            bar, text="\u2699 安裝 GSI 設定", command=self._on_install_cfg, width=17
         ).grid(row=0, column=6, padx=(0, 6))
         ttk.Button(
-            bar, text="? 使用教學", command=self._show_tutorial, width=12
-        ).grid(row=0, column=7)
+            bar, text="? 使用教學", command=self._show_tutorial, width=11
+        ).grid(row=0, column=7, padx=(0, 6))
+        ttk.Button(
+            bar,
+            text="GitHub",
+            command=lambda: webbrowser.open(PROJECT_URL),
+            width=9,
+        ).grid(row=0, column=8)
 
     def _build_settings(self, parent: ttk.Frame) -> None:
         frame = ttk.LabelFrame(parent, text=" 參數設定 ", padding=8)
@@ -740,10 +829,15 @@ class DglabApp:
         self.notebook.grid(row=0, column=0, sticky="nsew")
 
         for tab_name in TAB_ORDER:
-            tab = ttk.Frame(self.notebook, padding=10)
-            tab.columnconfigure(1, weight=1)
+            tab = ttk.Frame(self.notebook)
+            tab.columnconfigure(0, weight=1)
+            tab.rowconfigure(0, weight=1)
             self.notebook.add(tab, text=tab_name)
-            self._fill_tab(tab, tab_name)
+            # 每個分頁都可以上下滾動，欄位多也不會把視窗撐高
+            scrollable = ScrollableFrame(tab, height=SETTINGS_HEIGHT)
+            scrollable.grid(row=0, column=0, sticky="nsew")
+            self._fill_tab(scrollable.body, tab_name, padding=10)
+            scrollable.bind_wheel_to_children()
 
         footer = ttk.Frame(frame)
         footer.grid(row=1, column=0, sticky="ew", pady=(8, 0))
@@ -756,17 +850,19 @@ class DglabApp:
         self.apply_hint = ttk.Label(footer, text="", font=self.font_small, foreground=COLOR_WARN)
         self.apply_hint.grid(row=0, column=2, sticky="w", padx=10)
 
-    def _fill_tab(self, tab: ttk.Frame, tab_name: str) -> None:
+    def _fill_tab(self, tab: ttk.Frame, tab_name: str, *, padding: int = 0) -> None:
         """一個欄位一列：標籤 | 輸入框 | 說明。
 
         說明放在同一列右側而不是下面，這樣最長的分頁也只要 8 列就放得完。
         """
+        if padding:
+            tab.configure(padding=padding)
         tab.columnconfigure(2, weight=1)
         row = 0
         for field in FIELDS:
             if field.tab != tab_name:
                 continue
-            ttk.Label(tab, text=field.label, width=16, anchor="w").grid(
+            ttk.Label(tab, text=field.label, width=13, anchor="w").grid(
                 row=row, column=0, sticky="w", pady=4
             )
             if field.kind == "bool":
@@ -775,7 +871,7 @@ class DglabApp:
             elif field.kind == "choice":
                 var = tk.StringVar()
                 combo = ttk.Combobox(
-                    tab, textvariable=var, values=list(field.choices), state="readonly", width=20
+                    tab, textvariable=var, values=list(field.choices), state="readonly", width=18
                 )
                 combo.grid(row=row, column=1, sticky="w")
                 if field.key == "wave_preset":
@@ -784,7 +880,7 @@ class DglabApp:
                 var = tk.StringVar()
                 # 可編輯：清單是從 Discord 抓來的建議，也可以自己打
                 combo = ttk.Combobox(
-                    tab, textvariable=var, values=[], width=26
+                    tab, textvariable=var, values=[], width=24
                 )
                 combo.grid(row=row, column=1, sticky="w")
                 self.vars["__widget__" + field.key] = combo
@@ -799,18 +895,39 @@ class DglabApp:
                 self.vars["__widget__" + field.key] = box
             else:
                 var = tk.StringVar()
-                entry = ttk.Entry(tab, textvariable=var, width=26)
+                entry = ttk.Entry(tab, textvariable=var, width=24)
                 entry.grid(row=row, column=1, sticky="w", pady=4)
                 self.vars["__widget__" + field.key] = entry
             self.vars[field.key] = var
             if field.hint:
-                ttk.Label(
-                    tab, text=field.hint, style="Hint.TLabel", wraplength=300, justify="left"
-                ).grid(row=row, column=2, sticky="w", padx=(14, 0))
+                hint = ttk.Label(
+                    tab,
+                    text=field.hint,
+                    style="Hint.TLabel",
+                    justify="left",
+                    wraplength=HINT_WRAPLENGTH,
+                )
+                hint.grid(row=row, column=2, sticky="ew", padx=(14, 0))
+                hint.bind("<Configure>", self._autowrap_hint)
             row += 1
 
         if tab_name == "Discord":
             self._fill_discord_tab(tab, row)
+
+    def _autowrap_hint(self, event) -> None:
+        """讓說明文字依實際可用寬度換行，免得被裁掉。
+
+        Tk 的 Label 不會自動依容器寬度換行，所以要自己把 wraplength 調成
+        目前寬度。加了「變化超過 8px 才改」的判斷，避免 Configure 迴圈。
+        """
+        label = event.widget
+        width = max(120, int(event.width))
+        try:
+            current = int(float(label.cget("wraplength")))
+        except (TypeError, ValueError):  # pragma: no cover
+            current = 0
+        if abs(current - width) > 8:
+            label.configure(wraplength=width)
 
     def _fill_discord_tab(self, tab: ttk.Frame, row: int) -> None:
         """Discord 分頁多出來的：目前狀態、測試按鈕、取得 ID 的說明。"""
@@ -1537,6 +1654,18 @@ class DglabApp:
         self.root.clipboard_append(url)
         self._append_log("已複製配對連結到剪貼簿", "success")
 
+    def _qr_image_path(self) -> Path:
+        """QR 圖片要存哪裡。
+
+        用設定裡的 ``qr_png``（相對於程式目錄），留空就存成程式目錄下的
+        ``qrcode.png``。這裡刻意不跳「另存新檔」對話框 —— 按鈕的目的只是
+        「把圖打開來掃」，多問一個問題反而麻煩。
+        """
+        configured = self.config.socket.png_path
+        if configured:
+            return resolve_app_path(configured)
+        return app_directory() / DEFAULT_QR_IMAGE
+
     def _open_qr_image(self) -> None:
         url = self.engine.status.qr_url
         if not url:
@@ -1547,20 +1676,23 @@ class DglabApp:
                 "缺少套件", "沒有安裝 qrcode，無法產生圖片。", parent=self.root
             )
             return
-        path = filedialog.asksaveasfilename(
-            parent=self.root,
-            title="儲存 QR code 圖片",
-            defaultextension=".png",
-            initialfile="qrcode.png",
-            filetypes=[("PNG 圖片", "*.png")],
-        )
-        if not path:
+
+        path = self._qr_image_path()
+        if not qr_module.save_png(url, str(path)):
+            self._append_log(f"輸出 QR code 圖片失敗（{path}）", "error")
+            messagebox.showerror(
+                "無法輸出圖片",
+                f"寫入失敗：\n{path}\n\n"
+                "如果程式放在需要管理員權限的位置，請改用別的路徑"
+                "（設定裡的「QR 圖片路徑」）。",
+                parent=self.root,
+            )
             return
-        if qr_module.save_png(url, path):
-            self._append_log(f"QR code 圖片已存到 {path}", "success")
-            qr_module.open_image(path)
-        else:
-            self._append_log("輸出 QR code 圖片失敗", "error")
+        self._append_log(f"QR code 圖片已存到 {path}，正在開啟…", "success")
+        if not qr_module.open_image(str(path)):
+            self._append_log(
+                "無法自動開啟圖片，請自己到上面的路徑打開", "warning"
+            )
 
     def _on_close(self) -> None:
         if self.engine.running:
@@ -1827,15 +1959,17 @@ def main(argv: list[str] | None = None) -> int:
     except tk.TclError:  # pragma: no cover - 非 Windows
         pass
     app = DglabApp(root, config, config_path=args.config, dry_run=args.dry_run)
-    # 讓視窗依內容決定大小（最長的那個分頁會決定高度），
-    # 但不要高過螢幕，否則小螢幕上會看不到下面的按鈕。
+    # 視窗依內容決定大小。參數分頁有各自的固定高度（會自己滾），
+    # 所以視窗大小不會被欄位數量撐開；這裡只要確保不超過螢幕。
     root.update_idletasks()
     root.geometry("")
-    screen_height = root.winfo_screenheight()
-    limit = max(560, screen_height - 120)
-    if root.winfo_reqheight() > limit:
-        root.geometry(f"{root.winfo_reqwidth()}x{limit}")
-    root.minsize(940, 600)
+    width = root.winfo_reqwidth()
+    height = root.winfo_reqheight()
+    limit = max(560, root.winfo_screenheight() - 110)
+    if height > limit:
+        height = limit
+    root.geometry(f"{width}x{height}")
+    root.minsize(min(940, width), 560)
     try:
         root.mainloop()
     finally:
