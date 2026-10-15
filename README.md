@@ -467,11 +467,7 @@ python main.py --dry-run
 
 ## 使用（圖形介面，推薦）
 
-執行 `DGLAB-CS2.exe`（或 `python main_gui.py`）就會開啟介面：
-
-<p align="center">
-  <img src="docs/screenshot-main.png" alt="主介面" width="720">
-</p>
+執行 `DGLAB-CS2.exe`（或 `python main_gui.py`）就會開啟介面（畫面見[最上面那張圖](#dglab-cs2)）：
 
 畫面分成四塊：
 
