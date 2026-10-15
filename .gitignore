@@ -171,3 +171,6 @@ tests/_scratch_*/
 dglab-cs2.log
 qrcode.png
 config.toml.bak
+
+# 開發時隨手截的圖
+shot*.png
