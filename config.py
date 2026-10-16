@@ -182,6 +182,27 @@ class DeathStopConfig:
 
 
 @dataclass(frozen=True)
+class StreakConfig:
+    """連殺獎勵：連續擊殺時，每一殺扣掉的疊加值越來越多。"""
+
+    enabled: bool = True
+    #: 從第幾殺開始算獎勵（2 = 第二殺開始）
+    starts_at: int = 2
+    #: 每多一殺，這一殺再多扣多少疊加值
+    bonus_per_kill: float = 1.0
+    #: 單次額外扣減的上限
+    max_bonus: float = 6.0
+
+    def __post_init__(self) -> None:
+        if self.starts_at < 1:
+            raise ValueError("streak.starts_at 至少要是 1")
+        if self.bonus_per_kill < 0:
+            raise ValueError("streak.bonus_per_kill 不可為負")
+        if self.max_bonus < 0:
+            raise ValueError("streak.max_bonus 不可為負")
+
+
+@dataclass(frozen=True)
 class DglabConfig:
     """郊狼裝置與玩法設定。"""
 
@@ -196,10 +217,64 @@ class DglabConfig:
     stop_when_no_data_seconds: float = 30.0
     policy: StrengthPolicy = field(default_factory=StrengthPolicy)
     stack: StrengthStack = field(default_factory=StrengthStack)
+    streak: StreakConfig = field(default_factory=StreakConfig)
     output: OutputGate = field(default_factory=OutputGate)
     wave: WaveConfig = field(default_factory=WaveConfig)
     taser: TaserConfig = field(default_factory=TaserConfig)
     death_stop: DeathStopConfig = field(default_factory=DeathStopConfig)
+
+
+#: 可以綁定全域熱鍵的動作：``(設定鍵, 中文名稱)``。
+#:
+#: 放在設定層是因為「有哪些動作可以綁」同時是設定與介面的知識，
+#: 兩邊都從這裡讀才不會兜不起來。
+HOTKEY_ACTIONS: tuple[tuple[str, str], ...] = (
+    ("emergency_stop", "緊急停止（歸零並暫停）"),
+    ("toggle_pause", "暫停／繼續"),
+    ("reset_stack", "疊加歸零"),
+)
+
+
+@dataclass(frozen=True)
+class HotkeyConfig:
+    """全域熱鍵。
+
+    「全域」的意思是即使 CS2 是前景視窗也有效 —— 緊急的時候不必先切回本程式。
+
+    空字串代表不綁定。
+    """
+
+    enabled: bool = True
+    emergency_stop: str = "ctrl+alt+s"
+    toggle_pause: str = "ctrl+alt+p"
+    reset_stack: str = ""
+
+    def bindings(self) -> dict[str, str]:
+        """回傳 ``{動作名稱: 熱鍵字串}``，略過沒有綁定的。"""
+        out: dict[str, str] = {}
+        for key, _label in HOTKEY_ACTIONS:
+            value = str(getattr(self, key, "") or "").strip()
+            if value:
+                out[key] = value
+        return out
+
+
+@dataclass(frozen=True)
+class UpdateConfig:
+    """自動檢查更新。"""
+
+    enabled: bool = True
+    #: 啟動時自動檢查一次
+    check_on_start: bool = True
+    #: 之後每隔幾秒再檢查一次（0 = 只檢查啟動那次）
+    interval: float = 0.0
+    timeout: float = 10.0
+
+    def __post_init__(self) -> None:
+        if self.interval < 0:
+            raise ValueError("update.interval 不可為負")
+        if self.timeout <= 0:
+            raise ValueError("update.timeout 必須大於 0")
 
 
 @dataclass(frozen=True)
@@ -259,6 +334,8 @@ class AppConfig:
     socket: SocketConfig = field(default_factory=SocketConfig)
     dglab: DglabConfig = field(default_factory=DglabConfig)
     discord: DiscordConfig = field(default_factory=DiscordConfig)
+    hotkeys: HotkeyConfig = field(default_factory=HotkeyConfig)
+    update: UpdateConfig = field(default_factory=UpdateConfig)
 
 
 # ------------------------------------------------------------------ 解析
@@ -274,7 +351,67 @@ def parse_config(raw: dict[str, Any]) -> AppConfig:
     socket = _parse_socket(_require_table(raw, "socket"))
     dglab = _parse_dglab(_require_table(raw, "dglab"))
     discord = _parse_discord(_require_table(raw, "discord"))
-    return AppConfig(debug=debug, gsi=gsi, socket=socket, dglab=dglab, discord=discord)
+    hotkeys = _parse_hotkeys(raw.get("hotkeys", {}))
+    update = _parse_update(raw.get("update", {}))
+    return AppConfig(
+        debug=debug,
+        gsi=gsi,
+        socket=socket,
+        dglab=dglab,
+        discord=discord,
+        hotkeys=hotkeys,
+        update=update,
+    )
+
+
+def _optional_table(value: Any, name: str) -> dict[str, Any]:
+    """選用區塊：不存在或 None 時回傳空 dict，存在但不是 table 才報錯。"""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigError(f"[{name}] 必須是一個區塊（table）")
+    return value
+
+
+def _parse_hotkeys(raw: Any) -> HotkeyConfig:
+    table = _optional_table(raw, "hotkeys")
+    try:
+        config = HotkeyConfig(
+            enabled=bool(_get(table, "enabled", True, "hotkeys")),
+            emergency_stop=str(_get(table, "emergency_stop", "ctrl+alt+s", "hotkeys")),
+            toggle_pause=str(_get(table, "toggle_pause", "ctrl+alt+p", "hotkeys")),
+            reset_stack=str(_get(table, "reset_stack", "", "hotkeys")),
+        )
+    except ValueError as exc:
+        raise ConfigError(f"[hotkeys] 不合法：{exc}") from None
+
+    # 熱鍵字串在這裡先驗一次，免得使用者打完要到啟動時才發現打錯
+    try:
+        from hotkeys import parse_hotkey
+    except ImportError:  # pragma: no cover - 理論上不會發生
+        return config
+
+    for key, label in HOTKEY_ACTIONS:
+        value = str(getattr(config, key, "") or "").strip()
+        if value and parse_hotkey(value) is None:
+            raise ConfigError(
+                f"hotkeys.{key}（{label}）的熱鍵 {value!r} 看不懂。"
+                "格式像是 ctrl+alt+s，至少要有一個修飾鍵（ctrl／alt／shift／win）。"
+            )
+    return config
+
+
+def _parse_update(raw: Any) -> UpdateConfig:
+    table = _optional_table(raw, "update")
+    try:
+        return UpdateConfig(
+            enabled=bool(_get(table, "enabled", True, "update")),
+            check_on_start=bool(_get(table, "check_on_start", True, "update")),
+            interval=_get_number(table, "interval", 0.0, "update", low=0, high=86400),
+            timeout=_get_number(table, "timeout", 10.0, "update", low=0.5, high=120),
+        )
+    except ValueError as exc:
+        raise ConfigError(f"[update] 不合法：{exc}") from None
 
 
 def _parse_gsi(gsi_raw: dict[str, Any]) -> GsiConfig:
@@ -375,8 +512,20 @@ def _parse_dglab(dglab_raw: dict[str, Any]) -> DglabConfig:
                 dglab_raw, "death_stop_delay", 5.0, "dglab", low=0, high=600
             ),
         )
+        streak = StreakConfig(
+            enabled=bool(_get(dglab_raw, "streak_enabled", True, "dglab")),
+            starts_at=int(
+                _get_number(dglab_raw, "streak_starts_at", 2, "dglab", low=1, high=100)
+            ),
+            bonus_per_kill=_get_number(
+                dglab_raw, "streak_bonus_per_kill", 1.0, "dglab", low=0, high=200
+            ),
+            max_bonus=_get_number(
+                dglab_raw, "streak_max_bonus", 6.0, "dglab", low=0, high=200
+            ),
+        )
     except ValueError as exc:
-        raise ConfigError(f"dglab 的電擊槍／死亡歸零設定不合法：{exc}") from None
+        raise ConfigError(f"dglab 的電擊槍／死亡歸零／連殺設定不合法：{exc}") from None
 
     wave_raw = dglab_raw.get("wave", {})
     if not isinstance(wave_raw, dict):
@@ -411,6 +560,7 @@ def _parse_dglab(dglab_raw: dict[str, Any]) -> DglabConfig:
         ),
         policy=policy,
         stack=stack,
+        streak=streak,
         output=output,
         wave=wave,
         taser=taser,

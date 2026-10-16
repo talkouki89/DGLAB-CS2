@@ -156,12 +156,17 @@ class StrengthStack:
         self.value = self._clamped(self.value + self.death_gain * max(0, int(count)))
         return self.value
 
-    def apply_kills(self, count: int = 1) -> float:
-        """擊殺時呼叫；回傳更新後的疊加值。"""
+    def apply_kills(self, count: int = 1, *, extra: float = 0.0) -> float:
+        """擊殺時呼叫；回傳更新後的疊加值。
+
+        Args:
+            count: 這次偵測到幾次擊殺。
+            extra: 連殺獎勵額外要多扣的強度（由 :class:`KillStreak` 算出）。
+        """
         if not self.enabled:
             return 0.0
         self.value = self._clamped(
-            self.value - self.kill_reduction * max(0, int(count))
+            self.value - self.kill_reduction * max(0, int(count)) - max(0.0, float(extra))
         )
         return self.value
 
@@ -171,6 +176,79 @@ class StrengthStack:
 
     def reset(self) -> None:
         self.value = 0.0
+
+
+# --------------------------------------------------------------- 連殺獎勵
+
+
+@dataclass
+class KillStreak:
+    """連續擊殺的額外獎勵。
+
+    強度疊加本來就是「死亡增加、擊殺降低」。這裡再多一層：**連續擊殺**
+    （中間沒有死）時，每一殺扣的疊加值會越來越多，鼓勵玩家活著多殺人。
+
+    例如 ``starts_at=2``、``bonus_per_kill=1.0``、``max_bonus=6.0``：
+
+    ==========  ================================
+    第幾殺      這一殺額外多扣的疊加值
+    ==========  ================================
+    1           +0（還沒開始算）
+    2           +1.0
+    3           +2.0
+    4           +3.0
+    7 以上      +6.0（達到上限）
+    ==========  ================================
+
+    死亡會把連殺數歸零，所以獎勵要重新累積。
+    """
+
+    enabled: bool = True
+    #: 從第幾殺開始算獎勵（2 = 第二殺開始）
+    starts_at: int = 2
+    #: 每多一殺，這一殺再多扣多少疊加值
+    bonus_per_kill: float = 1.0
+    #: 單次額外扣減的上限
+    max_bonus: float = 6.0
+    #: 目前連殺數
+    count: int = 0
+
+    def __post_init__(self) -> None:
+        if self.starts_at < 1:
+            raise ValueError("streak.starts_at 至少要是 1")
+        if self.bonus_per_kill < 0:
+            raise ValueError("streak.bonus_per_kill 不可為負")
+        if self.max_bonus < 0:
+            raise ValueError("streak.max_bonus 不可為負")
+        self.count = max(0, int(self.count))
+
+    def register_kills(self, count: int = 1) -> float:
+        """記錄擊殺，回傳「總共要額外扣掉多少疊加值」。
+
+        連殺數**一律會累計**（本場統計要看），``enabled=False`` 只是不算獎勵。
+        """
+        extra = 0.0
+        for _ in range(max(0, int(count))):
+            self.count += 1
+            if not self.enabled or self.count < self.starts_at:
+                continue
+            steps = self.count - self.starts_at + 1
+            extra += min(self.max_bonus, self.bonus_per_kill * steps)
+        return extra
+
+    def register_death(self) -> None:
+        """死亡會中斷連殺。"""
+        self.count = 0
+
+    def bonus_for_next_kill(self) -> float:
+        """下一殺會多扣多少（給 UI 顯示用）。"""
+        if not self.enabled or self.count + 1 < self.starts_at:
+            return 0.0
+        steps = self.count + 1 - self.starts_at + 1
+        return min(self.max_bonus, self.bonus_per_kill * steps)
+
+    def reset(self) -> None:
+        self.count = 0
 
 
 # --------------------------------------------------------------- 輸出時機

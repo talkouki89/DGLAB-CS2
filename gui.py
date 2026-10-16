@@ -23,14 +23,17 @@ import threading
 import time
 import tkinter as tk
 import webbrowser
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from typing import Any
+from typing import Any, Callable, Sequence
 
 import cs2cfg
 import discord_rpc
+import hotkeys as hotkeys_module
 import tutorial
+import update_check
 from config import (
     AppConfig,
     ConfigError,
@@ -38,16 +41,31 @@ from config import (
     DglabConfig,
     DiscordConfig,
     GsiConfig,
+    HOTKEY_ACTIONS,
+    HotkeyConfig,
     SocketConfig,
+    StreakConfig,
     TaserConfig,
+    UpdateConfig,
     WaveConfig,
     load_config,
     with_max_strength,
 )
 from config_writer import config_values, save_config_values
+from coyote import __version__ as PROJECT_VERSION
 from coyote import qr as qr_module
 from coyote.socket_protocol import Channel
-from coyote.waveform import PRESET_NAMES
+from coyote.waveform import (
+    FRAME_SECONDS,
+    PRESET_NAMES,
+    WAVE_FREQ_MAX,
+    WAVE_FREQ_MIN,
+    WAVE_STRENGTH_MAX,
+    decode_wave_freq,
+    encode_wave_freq,
+    pulse_frequency_hz,
+    resolve_preset,
+)
 from engine import (
     ControlEngine,
     EngineState,
@@ -57,6 +75,39 @@ from engine import (
     resolve_app_path,
 )
 from strength import MODE_CONTINUOUS, MODE_HIT_ONLY, OutputGate, StrengthPolicy, StrengthStack
+from hotkeys import (
+    MOD_ALT,
+    MOD_CONTROL,
+    MOD_SHIFT,
+    MOD_WIN,
+    format_hotkey,
+    parse_hotkey,
+    vk_for_name,
+)
+
+#: tkinter 的 keysym 名稱和 Win32 的按鍵名稱不完全一樣，這裡補上差異。
+#: （Tk 用 Prior／Next 代表 PageUp／PageDown）
+TKSYM_ALIASES: dict[str, str] = {
+    "prior": "pageup",
+    "next": "pagedown",
+    "return": "enter",
+    "backspace": "backspace",
+    "kp_0": "numpad0",
+    "kp_1": "numpad1",
+    "kp_2": "numpad2",
+    "kp_3": "numpad3",
+    "kp_4": "numpad4",
+    "kp_5": "numpad5",
+    "kp_6": "numpad6",
+    "kp_7": "numpad7",
+    "kp_8": "numpad8",
+    "kp_9": "numpad9",
+    "kp_add": "add",
+    "kp_subtract": "subtract",
+    "kp_multiply": "multiply",
+    "kp_divide": "divide",
+    "kp_decimal": "decimal",
+}
 
 logger = logging.getLogger("dglab-cs2.gui")
 
@@ -114,6 +165,21 @@ HINT_WRAPLENGTH = 250
 #: 每隔幾個 tick 重新檢查一次 GSI 設定（tick 預設 150ms，所以大約 10 秒）
 GSI_CHECK_EVERY_TICKS = 66
 
+#: 本場統計面板的欄位順序（要跟 :meth:`stats.SessionStats.summary` 的標籤一致）。
+#: 每 5 個換一欄。
+DEFAULT_STATS_SUMMARY: tuple[tuple[str, str], ...] = (
+    ("時間", "0:00"),
+    ("擊殺 / 死亡", "0 / 0"),
+    ("K/D", "0.00"),
+    ("最佳連殺", "0"),
+    ("受擊次數", "0"),
+    ("承受傷害", "0"),
+    ("電擊槍觸發", "0"),
+    ("最高強度", "0"),
+    ("平均強度", "0.0"),
+    ("通電時間", "0:00"),
+)
+
 
 # --------------------------------------------------------------- 表單轉換
 
@@ -146,6 +212,22 @@ FIELDS: tuple[Field, ...] = (
     Field("疊加", "stack_kill_reduction", "擊殺降低", "float", "每次擊殺扣回多少強度"),
     Field("疊加", "stack_min", "疊加下限", "float", "可以設負值"),
     Field("疊加", "stack_max", "疊加上限", "float", ""),
+    Field(
+        "疊加",
+        "streak_enabled",
+        "連殺獎勵",
+        "bool",
+        "連續擊殺（中間沒死）時，每一殺扣掉的疊加值越來越多",
+    ),
+    Field("疊加", "streak_starts_at", "連殺從第幾殺起算", "int", "2 = 第二殺開始有獎勵"),
+    Field(
+        "疊加",
+        "streak_bonus_per_kill",
+        "每多一殺多扣",
+        "float",
+        "第二殺多扣 1 倍、第三殺多扣 2 倍…（單位是強度）",
+    ),
+    Field("疊加", "streak_max_bonus", "連殺獎勵上限", "float", "單次最多額外扣多少"),
     # --- 輸出 ---
     Field(
         "輸出",
@@ -195,6 +277,33 @@ FIELDS: tuple[Field, ...] = (
         "自訂取樣點",
         "text",
         "每行一組「波形頻率ms, 波形強度」，頻率 10~1000、強度 0~100（preset 選 custom 時才用）",
+    ),
+    # --- 熱鍵 ---
+    Field(
+        "熱鍵",
+        "hotkeys_enabled",
+        "啟用全域熱鍵",
+        "bool",
+        "即使 CS2 是前景視窗也有效 —— 緊急時不必先切回本程式",
+    ),
+    Field(
+        "熱鍵",
+        "hotkey_emergency_stop",
+        "緊急停止",
+        "hotkey",
+        "立刻把強度歸零並暫停輸出",
+    ),
+    Field("熱鍵", "hotkey_toggle_pause", "暫停／繼續", "hotkey", "切換暫停狀態"),
+    Field("熱鍵", "hotkey_reset_stack", "疊加歸零", "hotkey", "留空 = 不綁定"),
+    # --- 更新 ---
+    Field("更新", "update_enabled", "檢查更新", "bool", "啟動時問 GitHub 有沒有新版本"),
+    Field("更新", "update_check_on_start", "啟動時檢查", "bool", "只在這一次啟動時檢查"),
+    Field(
+        "更新",
+        "update_interval",
+        "重新檢查間隔（秒）",
+        "float",
+        "0 = 只檢查啟動那一次",
     ),
     # --- 連線 ---
     Field("連線", "socket_uri", "Socket 服務端", "text", "官方為 wss://ws.dungeon-lab.cn/"),
@@ -262,7 +371,16 @@ FIELDS: tuple[Field, ...] = (
 
 FIELD_BY_KEY: dict[str, Field] = {field.key: field for field in FIELDS}
 
-TAB_ORDER: tuple[str, ...] = ("基本", "疊加", "輸出", "波形", "連線", "Discord")
+TAB_ORDER: tuple[str, ...] = (
+    "基本",
+    "疊加",
+    "輸出",
+    "波形",
+    "連線",
+    "Discord",
+    "熱鍵",
+    "更新",
+)
 
 
 def form_values(config: AppConfig) -> dict[str, Any]:
@@ -271,6 +389,7 @@ def form_values(config: AppConfig) -> dict[str, Any]:
     policy = dglab.policy
     stack = dglab.stack
     gate = dglab.output
+    streak = dglab.streak
     return {
         "base_strength": policy.base_strength,
         "strength_per_hp": policy.strength_per_hp,
@@ -285,6 +404,10 @@ def form_values(config: AppConfig) -> dict[str, Any]:
         "stack_kill_reduction": stack.kill_reduction,
         "stack_min": stack.minimum,
         "stack_max": stack.maximum,
+        "streak_enabled": streak.enabled,
+        "streak_starts_at": streak.starts_at,
+        "streak_bonus_per_kill": streak.bonus_per_kill,
+        "streak_max_bonus": streak.max_bonus,
         "output_mode": gate.mode,
         "hit_duration": gate.hit_duration,
         "hit_boost": gate.hit_boost,
@@ -299,6 +422,13 @@ def form_values(config: AppConfig) -> dict[str, Any]:
             f"{frequency}, {strength}"
             for frequency, strength in dglab.wave.custom_samples
         ),
+        "hotkeys_enabled": config.hotkeys.enabled,
+        "hotkey_emergency_stop": config.hotkeys.emergency_stop,
+        "hotkey_toggle_pause": config.hotkeys.toggle_pause,
+        "hotkey_reset_stack": config.hotkeys.reset_stack,
+        "update_enabled": config.update.enabled,
+        "update_check_on_start": config.update.check_on_start,
+        "update_interval": config.update.interval,
         "socket_uri": config.socket.uri,
         "gsi_host": config.gsi.host,
         "gsi_port": config.gsi.port,
@@ -416,8 +546,26 @@ def config_from_form(base: AppConfig, values: dict[str, Any]) -> AppConfig:
             enabled=boolean("death_stop_enabled"),
             delay=number("death_stop_delay"),
         )
+        streak = StreakConfig(
+            enabled=boolean("streak_enabled"),
+            starts_at=int(number("streak_starts_at", int)),
+            bonus_per_kill=number("streak_bonus_per_kill"),
+            max_bonus=number("streak_max_bonus"),
+        )
     except ValueError as exc:
-        raise ValueError(f"電擊槍／死亡歸零設定不合法：{exc}") from None
+        raise ValueError(f"電擊槍／死亡歸零／連殺設定不合法：{exc}") from None
+
+    # 熱鍵字串先驗一次，不要等到註冊失敗才發現打錯
+    hotkey_values: dict[str, str] = {}
+    for key, label in HOTKEY_ACTIONS:
+        value = text("hotkey_" + key)
+        if value and parse_hotkey(value) is None:
+            raise ValueError(
+                f"「{label}」的熱鍵 {value!r} 看不懂。\n\n"
+                "格式像是 ctrl+alt+s，至少要有一個修飾鍵"
+                "（ctrl／alt／shift／win）。"
+            )
+        hotkey_values[key] = value
 
     channels = Channel.parse_all(choice("channels"))
     if not channels:
@@ -481,6 +629,18 @@ def config_from_form(base: AppConfig, values: dict[str, Any]) -> AppConfig:
             qr_open=boolean("qr_open"),
         ),
         discord=discord,
+        hotkeys=HotkeyConfig(
+            enabled=boolean("hotkeys_enabled"),
+            emergency_stop=hotkey_values.get("emergency_stop", ""),
+            toggle_pause=hotkey_values.get("toggle_pause", ""),
+            reset_stack=hotkey_values.get("reset_stack", ""),
+        ),
+        update=UpdateConfig(
+            enabled=boolean("update_enabled"),
+            check_on_start=boolean("update_check_on_start"),
+            interval=number("update_interval"),
+            timeout=base.update.timeout,
+        ),
         dglab=DglabConfig(
             channels=channels,
             max_strength=int(number("max_strength")),
@@ -489,6 +649,7 @@ def config_from_form(base: AppConfig, values: dict[str, Any]) -> AppConfig:
             stop_when_no_data_seconds=number("stop_when_no_data_seconds"),
             policy=policy,
             stack=stack,
+            streak=streak,
             output=output,
             wave=WaveConfig(preset=preset, custom_samples=custom_samples),
             taser=taser,
@@ -513,6 +674,544 @@ def connection_fields_changed(old: AppConfig, new: AppConfig) -> list[str]:
         for key in CONNECTION_FIELDS
         if before.get(key) != after.get(key)
     ]
+
+
+# ------------------------------------------------------------------- 折線圖
+
+
+class StrengthGraph(tk.Canvas):
+    """強度與血量的即時折線圖。
+
+    X 軸是「最近 N 個取樣點」，最新的畫在最右邊、舊的往左推 ——
+    像示波器一樣，看的重點是「剛剛發生什麼」。
+
+    兩條線各有自己的刻度，但**都正規化成「滿」在最上面**：強度以安全上限
+    為滿、血量以 100 為滿。這樣一眼就能看出「血快沒了」和「強度快頂到上限」
+    是不是同時發生。
+    """
+
+    #: 最多保留幾個取樣點（每個 tick 一點，預設 150ms 所以約 60 秒）
+    MAX_POINTS = 400
+
+    PADDING_LEFT = 34
+    PADDING_RIGHT = 6
+    PADDING_TOP = 8
+    PADDING_BOTTOM = 14
+
+    def __init__(self, parent: tk.Widget, *, width: int = 250, height: int = 140) -> None:
+        super().__init__(
+            parent,
+            width=width,
+            height=height,
+            background=SURFACE,
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        self._strength: deque[int] = deque(maxlen=self.MAX_POINTS)
+        self._health: deque[int] = deque(maxlen=self.MAX_POINTS)
+        self._capacity = 100
+        self._shown_capacity = 100
+        self.bind("<Configure>", lambda _event: self.redraw())
+
+    # ---------------------------------------------------------------- 資料
+
+    def push(self, strength: int, health: int, capacity: int) -> None:
+        """加入一個取樣點（不重畫，重畫的時機由呼叫端決定）。"""
+        self._capacity = max(1, int(capacity))
+        self._strength.append(max(0, int(strength)))
+        self._health.append(max(0, min(100, int(health))))
+
+    def clear(self) -> None:
+        self._strength.clear()
+        self._health.clear()
+        self.redraw()
+
+    @property
+    def sample_count(self) -> int:
+        return len(self._strength)
+
+    # ---------------------------------------------------------------- 繪圖
+
+    def _geometry(self) -> tuple[int, int, int, int]:
+        width = self.winfo_width()
+        height = self.winfo_height()
+        if width <= 1:
+            width = int(self["width"])
+        if height <= 1:
+            height = int(self["height"])
+        return (
+            self.PADDING_LEFT,
+            width - self.PADDING_RIGHT,
+            self.PADDING_TOP,
+            height - self.PADDING_BOTTOM,
+        )
+
+    def redraw(self) -> None:
+        self.delete("all")
+        left, right, top, bottom = self._geometry()
+        if right - left < 20 or bottom - top < 20:
+            return
+
+        # 上限取成「好看的整數」，免得刻度一直跳
+        self._shown_capacity = self._nice_max(self._capacity)
+
+        for ratio in (0.0, 0.25, 0.5, 0.75, 1.0):
+            y = bottom - (bottom - top) * ratio
+            colour = BORDER if ratio in (0.0, 1.0) else "#26263a"
+            self.create_line(left, y, right, y, fill=colour)
+            self.create_text(
+                left - 5,
+                y,
+                anchor="e",
+                text=str(int(round(self._shown_capacity * ratio))),
+                fill=TEXT_DIM,
+                font=("Consolas", 7),
+            )
+
+        if not self._strength:
+            self.create_text(
+                (left + right) // 2,
+                (top + bottom) // 2,
+                text="開始遊戲後會在這裡畫出強度變化",
+                fill=TEXT_DIM,
+                font=("Microsoft JhengHei UI", 8),
+            )
+            return
+
+        self._draw_series(self._health, PINK, 100.0, left, right, top, bottom)
+        self._draw_series(
+            self._strength, ACCENT, float(self._shown_capacity), left, right, top, bottom
+        )
+
+    def _draw_series(
+        self,
+        values: deque[int],
+        colour: str,
+        full_scale: float,
+        left: int,
+        right: int,
+        top: int,
+        bottom: int,
+    ) -> None:
+        count = len(values)
+        if count < 2 or full_scale <= 0:
+            return
+        # 右邊是「現在」、左邊是過去。用固定間距，所以資料會從右邊長出來。
+        step = (right - left) / max(1, self.MAX_POINTS - 1)
+        span = bottom - top
+        points: list[float] = []
+        for index, value in enumerate(values):
+            x = right - (count - 1 - index) * step
+            ratio = min(1.0, max(0.0, float(value) / full_scale))
+            points.extend((x, bottom - span * ratio))
+        if len(points) < 4:
+            return
+        self.create_line(
+            *points, fill=colour, width=2, capstyle="round", joinstyle="round"
+        )
+
+    @staticmethod
+    def _nice_max(value: int) -> int:
+        """把上限取成 10 的倍數，讓刻度是整數。"""
+        value = max(10, int(value))
+        for candidate in (10, 20, 25, 40, 50, 60, 80, 100, 120, 150, 200):
+            if value <= candidate:
+                return candidate
+        return value
+
+
+# --------------------------------------------------------------- 波形編輯器
+
+
+class WaveformEditor(tk.Toplevel):
+    """圖形化的自訂波形編輯器。
+
+    可以直接用滑鼠拉波形，不必手打 ``[[10, 100], ...]``。
+
+    座標刻意用「裝置值」而不是設定檔裡的輸入值：設定檔的波形頻率是
+    10 ~ 1000 的輸出單元時長，但真正有用的範圍集中在 10 ~ 240，用輸入值
+    畫圖會全部擠在最下面 9%。裝置值與輸入值可以互相換算
+    （:func:`decode_wave_freq`），所以編輯時用裝置值、存檔時換回輸入值。
+    """
+
+    FREQ_MIN = WAVE_FREQ_MIN
+    FREQ_MAX = WAVE_FREQ_MAX
+
+    PADDING_LEFT = 36
+    PADDING_RIGHT = 10
+    PADDING_TOP = 10
+    PADDING_BOTTOM = 18
+    HANDLE_RADIUS = 4
+
+    def __init__(
+        self,
+        master: tk.Misc,
+        samples: Sequence[tuple[int, int]],
+        on_apply: Callable[[list[tuple[int, int]]], None],
+        *,
+        font_normal: tuple | None = None,
+        font_small: tuple | None = None,
+    ) -> None:
+        super().__init__(master, background=BG)
+        self.title("波形編輯器 — DGLAB-CS2")
+        self.transient(master)
+        self.grab_set()
+        self._on_apply = on_apply
+        self._font_normal = font_normal or ("Microsoft JhengHei UI", 10)
+        self._font_small = font_small or ("Microsoft JhengHei UI", 9)
+
+        self._mode = "strength"
+        self._drag: int | None = None
+        #: ``[[裝置波形頻率, 波形強度], ...]``
+        self._points: list[list[int]] = [
+            [encode_wave_freq(int(freq)), int(strength)] for freq, strength in samples
+        ] or [[WAVE_FREQ_MIN, 100]] * 8
+
+        self._build()
+        self._redraw()
+        self.update_idletasks()
+        self._centre_on_parent()
+
+    # ------------------------------------------------------------ 建立畫面
+
+    def _build(self) -> None:
+        outer = ttk.Frame(self, padding=12)
+        outer.pack(fill="both", expand=True)
+        outer.columnconfigure(0, weight=1)
+
+        toolbar = ttk.Frame(outer)
+        toolbar.grid(row=0, column=0, sticky="ew")
+
+        ttk.Label(toolbar, text="編輯：").pack(side="left")
+        self._mode_var = tk.StringVar(value="strength")
+        for value, label in (("strength", "波形強度"), ("frequency", "波形頻率")):
+            tk.Radiobutton(
+                toolbar,
+                text=label,
+                value=value,
+                variable=self._mode_var,
+                command=self._on_mode_change,
+                background=BG,
+                foreground=TEXT,
+                activebackground=BG,
+                activeforeground=ACCENT,
+                selectcolor=SURFACE2,
+                highlightthickness=0,
+                borderwidth=0,
+                cursor="hand2",
+            ).pack(side="left", padx=(6, 0))
+
+        ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=10)
+        ttk.Label(toolbar, text="套用預設集：").pack(side="left")
+        self._preset_var = tk.StringVar(value="steady")
+        ttk.Combobox(
+            toolbar,
+            textvariable=self._preset_var,
+            values=[name for name in PRESET_NAMES if name != "custom"],
+            state="readonly",
+            width=12,
+        ).pack(side="left", padx=6)
+        ttk.Button(toolbar, text="載入", command=self._load_preset, width=6).pack(side="left")
+
+        self.canvas = tk.Canvas(
+            outer,
+            height=210,
+            background=SURFACE,
+            highlightthickness=0,
+            borderwidth=0,
+            cursor="hand2",
+        )
+        self.canvas.grid(row=1, column=0, sticky="ew", pady=(10, 6))
+        self.canvas.bind("<Button-1>", self._on_press)
+        self.canvas.bind("<B1-Motion>", self._on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_release)
+        self.canvas.bind("<Double-Button-1>", self._on_double_click)
+        self.canvas.bind("<Configure>", lambda _event: self._redraw())
+
+        tools = ttk.Frame(outer)
+        tools.grid(row=2, column=0, sticky="ew")
+        for label, command in (
+            ("＋ 取樣點", self._add_point),
+            ("－ 取樣點", self._remove_point),
+            ("拉平", self._flatten),
+            ("反轉", self._reverse),
+            ("重設", self._reset),
+        ):
+            ttk.Button(tools, text=label, command=command, width=10).pack(
+                side="left", padx=(0, 5)
+            )
+
+        self.info = ttk.Label(outer, text="", style="Caption.TLabel")
+        self.info.grid(row=3, column=0, sticky="w", pady=(8, 0))
+
+        footer = ttk.Frame(outer)
+        footer.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        ttk.Label(
+            footer,
+            text="拖曳圓點調整數值・雙擊圓點刪除、雙擊空白處新增",
+            style="Caption.TLabel",
+        ).pack(side="left")
+        ttk.Button(footer, text="取消", command=self.destroy, width=10).pack(side="right")
+        ttk.Button(
+            footer,
+            text="套用為自訂波形",
+            command=self._apply,
+            style="Primary.TButton",
+            width=16,
+        ).pack(side="right", padx=6)
+
+    def _centre_on_parent(self) -> None:
+        parent = self.master
+        try:
+            x = parent.winfo_rootx() + max(
+                0, (parent.winfo_width() - self.winfo_width()) // 2
+            )
+            y = parent.winfo_rooty() + 60
+            self.geometry(f"+{x}+{y}")
+        except tk.TclError:  # pragma: no cover - 視窗還沒對應
+            pass
+        self.lift()
+
+    # ------------------------------------------------------------ 座標換算
+
+    @staticmethod
+    def _to_input(device_freq: int) -> int:
+        """裝置值 → 設定檔的輸入值。"""
+        return decode_wave_freq(int(device_freq))
+
+    def _plot(self) -> tuple[int, int, int, int]:
+        width = self.canvas.winfo_width()
+        height = self.canvas.winfo_height()
+        if width <= 1:
+            width = int(self.canvas["width"])
+        if height <= 1:
+            height = int(self.canvas["height"])
+        return (
+            self.PADDING_LEFT,
+            width - self.PADDING_RIGHT,
+            self.PADDING_TOP,
+            height - self.PADDING_BOTTOM,
+        )
+
+    def _x_for(self, index: int) -> float:
+        left, right, _top, _bottom = self._plot()
+        return left + (right - left) * index / max(1, len(self._points) - 1)
+
+    def _ratio_for(self, index: int, mode: str) -> float:
+        if mode == "strength":
+            return self._points[index][1] / WAVE_STRENGTH_MAX
+        span = max(1, self.FREQ_MAX - self.FREQ_MIN)
+        return (self._points[index][0] - self.FREQ_MIN) / span
+
+    def _y_for(self, index: int, mode: str | None = None) -> float:
+        _left, _right, top, bottom = self._plot()
+        ratio = min(1.0, max(0.0, self._ratio_for(index, mode or self._mode)))
+        return bottom - (bottom - top) * ratio
+
+    def _value_from_y(self, y: float) -> int:
+        _left, _right, top, bottom = self._plot()
+        ratio = min(1.0, max(0.0, (bottom - float(y)) / max(1, bottom - top)))
+        if self._mode == "strength":
+            return int(round(ratio * WAVE_STRENGTH_MAX))
+        return int(round(self.FREQ_MIN + ratio * (self.FREQ_MAX - self.FREQ_MIN)))
+
+    def _hit_test(self, x: float, y: float) -> int | None:
+        best: int | None = None
+        best_distance = float((self.HANDLE_RADIUS + 7) ** 2)
+        for index in range(len(self._points)):
+            dx = self._x_for(index) - x
+            dy = self._y_for(index) - y
+            distance = dx * dx + dy * dy
+            if distance <= best_distance:
+                best_distance = distance
+                best = index
+        return best
+
+    # ------------------------------------------------------------ 繪圖
+
+    def _redraw(self) -> None:
+        self.canvas.delete("all")
+        left, right, top, bottom = self._plot()
+        if right - left < 20 or bottom - top < 20:
+            return
+
+        accent = ACCENT if self._mode == "strength" else "#a78bfa"
+
+        for ratio in (0.0, 0.25, 0.5, 0.75, 1.0):
+            y = bottom - (bottom - top) * ratio
+            self.canvas.create_line(
+                left, y, right, y, fill=BORDER if ratio in (0.0, 1.0) else "#26263a"
+            )
+            if self._mode == "strength":
+                label = str(int(round(WAVE_STRENGTH_MAX * ratio)))
+            else:
+                label = str(int(round(self.FREQ_MIN + (self.FREQ_MAX - self.FREQ_MIN) * ratio)))
+            self.canvas.create_text(
+                left - 5, y, anchor="e", text=label, fill=TEXT_DIM, font=("Consolas", 7)
+            )
+
+        # 兩條曲線都畫，非編輯中的那條用暗色當背景參考
+        self._draw_curve("frequency", "#5b4b8a", left, right, top, bottom)
+        self._draw_curve(
+            "strength",
+            "#1f6f7d" if self._mode != "strength" else accent,
+            left,
+            right,
+            top,
+            bottom,
+        )
+        self._draw_curve(self._mode, accent, left, right, top, bottom, handles=True)
+        self._update_info()
+
+    def _draw_curve(
+        self,
+        mode: str,
+        colour: str,
+        left: int,
+        right: int,
+        top: int,
+        bottom: int,
+        *,
+        handles: bool = False,
+    ) -> None:
+        if not self._points:
+            return
+        points: list[float] = []
+        for index in range(len(self._points)):
+            ratio = min(1.0, max(0.0, self._ratio_for(index, mode)))
+            points.extend((self._x_for(index), bottom - (bottom - top) * ratio))
+
+        if len(points) >= 4:
+            self.canvas.create_line(
+                *points, fill=colour, width=2, capstyle="round", joinstyle="round"
+            )
+        if not handles:
+            return
+        radius = self.HANDLE_RADIUS
+        for index in range(0, len(points), 2):
+            x, y = points[index], points[index + 1]
+            self.canvas.create_oval(
+                x - radius,
+                y - radius,
+                x + radius,
+                y + radius,
+                fill=BG,
+                outline=colour,
+                width=2,
+            )
+
+    def _update_info(self) -> None:
+        count = len(self._points)
+        seconds = count * FRAME_SECONDS / 4  # 每個取樣點佔 25ms
+        strengths = [point[1] for point in self._points]
+        freqs = [point[0] for point in self._points]
+        self.info.configure(
+            text=(
+                f"{count} 個取樣點（每個 25ms，循環 {seconds * 1000:.0f}ms）　"
+                f"強度 {min(strengths)} ~ {max(strengths)}　"
+                f"波形頻率 {min(freqs)} ~ {max(freqs)}"
+                f"（{pulse_frequency_hz(min(freqs)):.0f} ~ "
+                f"{pulse_frequency_hz(max(freqs)):.0f} Hz）"
+            )
+        )
+
+    # ------------------------------------------------------------ 互動
+
+    def _on_mode_change(self) -> None:
+        self._mode = self._mode_var.get()
+        self._redraw()
+
+    def _on_press(self, event: tk.Event) -> None:
+        index = self._hit_test(event.x, event.y)
+        if index is not None:
+            self._drag = index
+            self._apply_drag(event.y)
+
+    def _on_drag(self, event: tk.Event) -> None:
+        if self._drag is not None:
+            self._apply_drag(event.y)
+
+    def _on_release(self, _event: tk.Event) -> None:
+        self._drag = None
+
+    def _apply_drag(self, y: float) -> None:
+        if self._drag is None:
+            return
+        value = self._value_from_y(float(y))
+        if self._mode == "strength":
+            self._points[self._drag][1] = value
+        else:
+            self._points[self._drag][0] = value
+        self._redraw()
+
+    def _on_double_click(self, event: tk.Event) -> None:
+        """圓點上雙擊 = 刪掉它；空白處雙擊 = 在最近的間隔插入一個點。"""
+        index = self._hit_test(event.x, event.y)
+        if index is not None and len(self._points) > 1:
+            del self._points[index]
+            self._drag = None
+        else:
+            self._points.insert(self._nearest_gap(event.x), [WAVE_FREQ_MIN, 100])
+        self._redraw()
+
+    def _nearest_gap(self, x: float) -> int:
+        best, best_distance = len(self._points), None
+        for index in range(len(self._points) - 1):
+            middle = (self._x_for(index) + self._x_for(index + 1)) / 2
+            distance = abs(middle - x)
+            if best_distance is None or distance < best_distance:
+                best, best_distance = index + 1, distance
+        return best
+
+    def _add_point(self) -> None:
+        if len(self._points) >= 64:
+            return
+        template = self._points[-1] if self._points else [WAVE_FREQ_MIN, 100]
+        self._points.append(list(template))
+        self._redraw()
+
+    def _remove_point(self) -> None:
+        if len(self._points) > 1:
+            self._points.pop()
+            self._redraw()
+
+    def _flatten(self) -> None:
+        """把所有點拉成平均值 —— 想要穩定輸出時很好用。"""
+        if not self._points:
+            return
+        index = 1 if self._mode == "strength" else 0
+        average = int(round(sum(p[index] for p in self._points) / len(self._points)))
+        for point in self._points:
+            point[index] = average
+        self._redraw()
+
+    def _reverse(self) -> None:
+        self._points.reverse()
+        self._redraw()
+
+    def _reset(self) -> None:
+        self._points = [[WAVE_FREQ_MIN, 100]] * 8
+        self._redraw()
+
+    def _load_preset(self) -> None:
+        name = self._preset_var.get()
+        if name == "custom":
+            return
+        try:
+            frames = resolve_preset(name)
+        except ValueError:
+            return
+        self._points = [[frame.frequency, frame.strength] for frame in frames]
+        self._redraw()
+
+    def _apply(self) -> None:
+        self._on_apply(self.samples)
+        self.destroy()
+
+    @property
+    def samples(self) -> list[tuple[int, int]]:
+        """目前編輯中的取樣點（換算成設定檔要的輸入值）。"""
+        return [(self._to_input(point[0]), point[1]) for point in self._points]
 
 
 @dataclass
@@ -639,10 +1338,22 @@ class DglabApp:
         #: 使用者手動填的 Discord 狀態說明（沒有就顯示連線狀態）
         self._discord_note = ""
 
+        #: 折線圖每兩個 tick 重畫一次
+        self._graph_tick = 0
+        #: 熱鍵觸發（背景執行緒）→ 主執行緒處理
+        self._hotkey_queue: queue.Queue[str] = queue.Queue()
+        #: 更新檢查的結果（背景執行緒）→ 主執行緒處理
+        self._update_queue: queue.Queue[Any] = queue.Queue()
+        self._update_thread: threading.Thread | None = None
+        self._update_last_check: float | None = None
+        self._update_enabled_now = False
+
         self._build_style()
         self._apply_window_icon()
         self._build_layout()
         self._load_form(config)
+        #: 更新提示要是按了「不再提醒」就不會再跳出來
+        self._setup_hotkeys()
         self._append_log(
             f"設定檔：{config_path}"
             + ("（模擬模式：不會真的控制裝置）" if dry_run else ""),
@@ -667,6 +1378,12 @@ class DglabApp:
         # 開程式就直接連線並顯示 QR code，使用者少按一個按鈕；
         # 還沒配對之前不會有任何輸出，所以是安全的。
         root.after(400, self._autostart)
+        # 更新檢查晚一點再跑，不要跟啟動搶資源
+        self._update_enabled_now = bool(
+            config.update.enabled and config.update.check_on_start
+        )
+        if self._update_enabled_now:
+            root.after(2500, self._maybe_check_update)
 
     def _autostart(self) -> None:
         if not self.engine.running and not self._stopping:
@@ -915,7 +1632,16 @@ class DglabApp:
         main.columnconfigure(1, weight=1)
         main.rowconfigure(0, weight=1)
 
-        self._build_qr_box(main)
+        # 左欄自己是一個容器：QR 在上、折線圖在下。
+        # 兩者如果各自佔 main 的一列，右欄只跨第一列，就會多出一列的高度。
+        left = ttk.Frame(main)
+        left.grid(row=0, column=0, sticky="nsew")
+        left.columnconfigure(0, weight=1)
+        left.rowconfigure(0, weight=3)
+        left.rowconfigure(1, weight=2)
+
+        self._build_qr_box(left)
+        self._build_graph(left)
 
         right = ttk.Frame(main)
         right.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
@@ -954,6 +1680,28 @@ class DglabApp:
         )
         # 讓 QR 區塊在垂直方向可以跟著視窗長高
         qr_box.rowconfigure(4, weight=1)
+
+    def _build_graph(self, parent: ttk.Frame) -> None:
+        """QR code 下面放強度／血量的即時折線圖。"""
+        frame = ttk.LabelFrame(parent, text=" 強度歷程 ", padding=8)
+        frame.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(0, weight=1)
+
+        self.graph = StrengthGraph(frame, width=self.QR_SIZE, height=150)
+        self.graph.grid(row=0, column=0, sticky="nsew")
+
+        legend = ttk.Frame(frame)
+        legend.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        for colour, text in ((ACCENT, "強度"), (PINK, "血量")):
+            ttk.Label(legend, text="\u25cf", foreground=colour, font=("Segoe UI", 10)).pack(
+                side="left"
+            )
+            ttk.Label(legend, text=text, style="Caption.TLabel").pack(
+                side="left", padx=(3, 12)
+            )
+        self.graph_hint = ttk.Label(legend, text="最近 60 秒", style="Caption.TLabel")
+        self.graph_hint.pack(side="right")
 
     def _build_info(self, parent: ttk.Frame) -> None:
         info = ttk.LabelFrame(parent, text=" 即時狀態 ", padding=10)
@@ -1050,6 +1798,11 @@ class DglabApp:
             width=9,
         ).grid(row=0, column=8)
 
+        # 有新版本時才顯示（沒有就 grid_remove，完全不佔高度）
+        self.update_banner = ttk.Frame(bar)
+        self.update_banner.grid(row=1, column=0, columnspan=9, sticky="ew", pady=(8, 0))
+        self.update_banner.grid_remove()
+
     def _build_settings(self, parent: ttk.Frame) -> None:
         frame = ttk.LabelFrame(parent, text=" 參數設定 ", padding=8)
         frame.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
@@ -1130,9 +1883,40 @@ class DglabApp:
                 )
                 combo.grid(row=row, column=1, sticky="w")
                 self.vars["__widget__" + field.key] = combo
+            elif field.kind == "hotkey":
+                var = tk.StringVar()
+                holder = ttk.Frame(tab)
+                holder.grid(row=row, column=1, sticky="w", pady=4)
+                entry = ttk.Entry(holder, textvariable=var, width=16, state="readonly")
+                entry.pack(side="left")
+                ttk.Button(
+                    holder,
+                    text="錄製",
+                    width=6,
+                    command=lambda key=field.key: self._record_hotkey(key),
+                ).pack(side="left", padx=(6, 0))
+                ttk.Button(
+                    holder,
+                    text="清除",
+                    width=6,
+                    command=lambda variable=var: variable.set(""),
+                ).pack(side="left", padx=(4, 0))
+                self.vars["__widget__" + field.key] = entry
             elif field.kind == "text" and field.key == "wave_custom":
                 var = tk.StringVar()
-                box = tk.Text(tab, height=4, width=30, font=("Consolas", 10))
+                box = tk.Text(
+                    tab,
+                    height=4,
+                    width=30,
+                    font=("Consolas", 10),
+                    background=SURFACE2,
+                    foreground=TEXT,
+                    insertbackground=ACCENT,
+                    relief="flat",
+                    borderwidth=0,
+                    padx=6,
+                    pady=4,
+                )
                 box.grid(row=row, column=1, sticky="w", pady=4)
                 box.bind(
                     "<KeyRelease>",
@@ -1159,6 +1943,175 @@ class DglabApp:
 
         if tab_name == "Discord":
             self._fill_discord_tab(tab, row)
+        elif tab_name == "波形":
+            self._fill_wave_tab(tab, row)
+
+    def _fill_wave_tab(self, tab: ttk.Frame, row: int) -> None:
+        """波形分頁多放一顆「開啟波形編輯器」的按鈕。"""
+        ttk.Label(tab, text="圖形化編輯", anchor="w").grid(
+            row=row, column=0, sticky="w", pady=4, padx=(0, 12)
+        )
+        ttk.Button(
+            tab,
+            text="🎨 開啟波形編輯器",
+            command=self._open_wave_editor,
+            width=20,
+        ).grid(row=row, column=1, sticky="w", pady=4)
+        hint = ttk.Label(
+            tab,
+            text="用滑鼠直接拉波形，不用手打數字；套用後會自動把預設集切成 custom",
+            style="Hint.TLabel",
+            justify="left",
+            wraplength=HINT_WRAPLENGTH,
+        )
+        hint.grid(row=row, column=2, sticky="ew", padx=(14, 0))
+        hint.bind("<Configure>", self._autowrap_hint)
+
+    # ------------------------------------------------------- 波形編輯器
+
+    def _current_wave_samples(self) -> list[tuple[int, int]]:
+        """目前表單裡的自訂取樣點；沒填的話就用目前預設集當起點。"""
+        try:
+            parsed = parse_custom_samples(str(self.vars["wave_custom"].get()))
+        except (KeyError, ValueError):
+            parsed = ()
+        if parsed:
+            return list(parsed)
+        preset = str(self.vars.get("wave_preset", tk.StringVar()).get() or "steady")
+        if preset == "custom":
+            preset = "steady"
+        try:
+            frames = resolve_preset(preset)
+        except ValueError:
+            return []
+        return [(decode_wave_freq(frame.frequency), frame.strength) for frame in frames]
+
+    def _open_wave_editor(self) -> None:
+        WaveformEditor(
+            self.root,
+            self._current_wave_samples(),
+            self._apply_wave_samples,
+            font_normal=self.font_normal,
+            font_small=self.font_small,
+        )
+
+    def _apply_wave_samples(self, samples: list[tuple[int, int]]) -> None:
+        """把編輯器的結果寫回表單（並把預設集切成 custom）。"""
+        text = "\n".join(f"{frequency}, {strength}" for frequency, strength in samples)
+        var = self.vars.get("wave_custom")
+        if isinstance(var, tk.StringVar):
+            var.set(text)
+        widget = self.vars.get("__widget__wave_custom")
+        if isinstance(widget, tk.Text):
+            widget.delete("1.0", "end")
+            widget.insert("1.0", text)
+        preset = self.vars.get("wave_preset")
+        if isinstance(preset, tk.StringVar):
+            preset.set("custom")
+        self._sync_wave_hint()
+        self._append_log(
+            f"波形編輯器：已套用 {len(samples)} 個取樣點，記得按「套用設定」生效",
+            "success",
+        )
+
+    # ------------------------------------------------------- 熱鍵錄製
+
+    _MODIFIER_KEYSYMS = frozenset(
+        {
+            "control_l", "control_r", "shift_l", "shift_r",
+            "alt_l", "alt_r", "win_l", "win_r", "super_l", "super_r",
+            "meta_l", "meta_r", "caps_lock", "num_lock",
+        }
+    )
+
+    def _hotkey_from_event(self, event: tk.Event) -> tuple[int, int] | None:
+        """把 tkinter 的按鍵事件轉成 ``(修飾鍵, 虛擬鍵碼)``。
+
+        回傳 ``None`` 代表這個鍵不能當熱鍵（例如只按了 Ctrl 本身）。
+        """
+        name = str(event.keysym or "").strip().lower()
+        if not name or name in self._MODIFIER_KEYSYMS:
+            return None
+        name = TKSYM_ALIASES.get(name, name)
+        vk = vk_for_name(name)
+        if vk is None:
+            return None
+
+        state = int(event.state)
+        modifiers = 0
+        if state & 0x0004:
+            modifiers |= MOD_CONTROL
+        if state & 0x0001:
+            modifiers |= MOD_SHIFT
+        # Tk 在 Windows 上把 Alt 放在 Mod1，不同版本位置不太一樣，兩個都認
+        if state & 0x0008 or state & 0x20000:
+            modifiers |= MOD_ALT
+        if state & 0x0040:
+            modifiers |= MOD_WIN
+        return modifiers, vk
+
+    def _record_hotkey(self, key: str) -> None:
+        """開一個小視窗，讓使用者直接按組合鍵。"""
+        field = FIELD_BY_KEY.get(key)
+        title = field.label if field else key
+
+        dialog = tk.Toplevel(self.root, background=BG)
+        dialog.title("錄製熱鍵 — DGLAB-CS2")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        ttk.Label(
+            dialog, text=f"要綁定的動作：{title}", style="Title.TLabel", padding=(18, 16, 18, 2)
+        ).pack(anchor="w")
+        ttk.Label(
+            dialog,
+            text="請直接按下想用的組合鍵（至少要有一個修飾鍵）",
+            style="Caption.TLabel",
+            padding=(18, 0, 18, 12),
+        ).pack(anchor="w")
+        preview = ttk.Label(dialog, text="等待按鍵…", style="Big.TLabel", padding=(18, 0, 18, 8))
+        preview.pack(anchor="w")
+        status = ttk.Label(dialog, text="", style="Caption.TLabel", padding=(18, 0, 18, 4))
+        status.pack(anchor="w")
+
+        def finish(value: str) -> None:
+            variable = self.vars.get(key)
+            if isinstance(variable, tk.StringVar):
+                variable.set(value)
+            dialog.destroy()
+
+        def on_key(event: tk.Event) -> str:
+            if event.keysym == "Escape":
+                dialog.destroy()
+                return "break"
+            parsed = self._hotkey_from_event(event)
+            if parsed is None:
+                status.configure(
+                    text=f"「{event.keysym}」不能當熱鍵，請換一個", foreground=COLOR_WARN
+                )
+                return "break"
+            modifiers, vk = parsed
+            if not modifiers:
+                status.configure(
+                    text="至少要有一個修飾鍵（ctrl／alt／shift／win）", foreground=COLOR_WARN
+                )
+                preview.configure(text=format_hotkey(modifiers, vk))
+                return "break"
+            finish(format_hotkey(modifiers, vk))
+            return "break"
+
+        bar = ttk.Frame(dialog, padding=(18, 14, 18, 16))
+        bar.pack(fill="x")
+        ttk.Button(bar, text="不綁定", command=lambda: finish(""), width=10).pack(side="right")
+        ttk.Button(bar, text="取消", command=dialog.destroy, width=10).pack(
+            side="right", padx=6
+        )
+
+        dialog.bind("<KeyPress>", on_key)
+        dialog.update_idletasks()
+        x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - dialog.winfo_width()) // 2)
+        dialog.geometry(f"+{x}+{self.root.winfo_rooty() + 120}")
+        dialog.focus_force()
 
     def _autowrap_hint(self, event) -> None:
         """讓說明文字依實際可用寬度換行，免得被裁掉。
@@ -1339,13 +2292,22 @@ class DglabApp:
         self._update_discord_status(note)
 
     def _build_log(self) -> None:
-        frame = ttk.LabelFrame(self.root, text=" 事件紀錄 ", padding=8)
+        """下半部：事件紀錄與本場統計共用一個分頁框，不佔額外高度。"""
+        frame = ttk.Frame(self.root)
         frame.grid(row=3, column=0, sticky="nsew", padx=12, pady=10)
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(0, weight=1)
 
+        self.bottom_tabs = ttk.Notebook(frame)
+        self.bottom_tabs.grid(row=0, column=0, sticky="nsew")
+
+        log_tab = ttk.Frame(self.bottom_tabs)
+        log_tab.columnconfigure(0, weight=1)
+        log_tab.rowconfigure(0, weight=1)
+        self.bottom_tabs.add(log_tab, text="事件紀錄")
+
         self.log_text = tk.Text(
-            frame,
+            log_tab,
             height=6,
             wrap="word",
             state="disabled",
@@ -1361,7 +2323,7 @@ class DglabApp:
             pady=6,
         )
         self.log_text.grid(row=0, column=0, sticky="nsew")
-        scroll = ttk.Scrollbar(frame, command=self.log_text.yview)
+        scroll = ttk.Scrollbar(log_tab, command=self.log_text.yview)
         scroll.grid(row=0, column=1, sticky="ns")
         self.log_text.configure(yscrollcommand=scroll.set)
         self.log_text.tag_configure("success", foreground=COLOR_OK)
@@ -1369,8 +2331,61 @@ class DglabApp:
         self.log_text.tag_configure("error", foreground=COLOR_BAD)
         self.log_text.tag_configure("info", foreground=TEXT_DIM)
 
-        ttk.Button(frame, text="清除紀錄", command=self._clear_log, width=10).grid(
+        ttk.Button(log_tab, text="清除紀錄", command=self._clear_log, width=10).grid(
             row=1, column=0, sticky="e", pady=(6, 0)
+        )
+
+        self._build_stats_tab()
+
+    def _build_stats_tab(self) -> None:
+        """本場統計：一整排「標籤 → 數值」。"""
+        tab = ttk.Frame(self.bottom_tabs, padding=(12, 10))
+        tab.columnconfigure(0, weight=1)
+        self.bottom_tabs.add(tab, text="本場統計")
+
+        grid = ttk.Frame(tab)
+        grid.grid(row=0, column=0, sticky="nw")
+        #: ``{標籤: 顯示數值的 Label}``，由 :meth:`_refresh_stats` 更新
+        self.stat_labels: dict[str, ttk.Label] = {}
+        for index, (label, _placeholder) in enumerate(DEFAULT_STATS_SUMMARY):
+            # 橫的排：每 5 個換一列，這樣只佔兩列高度
+            line, column = divmod(index, 5)
+            cell = ttk.Frame(grid)
+            cell.grid(row=line, column=column, sticky="w", padx=(0, 24), pady=2)
+            ttk.Label(cell, text=label, style="Caption.TLabel").pack(anchor="w")
+            value = ttk.Label(cell, text="—", style="Value.TLabel")
+            value.pack(anchor="w")
+            self.stat_labels[label] = value
+
+        footer = ttk.Frame(tab)
+        footer.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        self.stats_hint = ttk.Label(footer, text="", style="Caption.TLabel")
+        self.stats_hint.pack(side="left")
+        ttk.Button(footer, text="統計歸零", command=self._reset_stats, width=10).pack(
+            side="right"
+        )
+
+    def _reset_stats(self) -> None:
+        self.engine.reset_stats()
+        self._refresh_stats(None)
+        self._append_log("本場統計已歸零", "info")
+
+    def _refresh_stats(self, stats) -> None:
+        if not hasattr(self, "stat_labels"):
+            return
+        if stats is None:
+            for label in self.stat_labels:
+                self.stat_labels[label].configure(text="—")
+            if hasattr(self, "stats_hint"):
+                self.stats_hint.configure(text="")
+            return
+        for label, value in stats.summary():
+            if label in self.stat_labels:
+                self.stat_labels[label].configure(text=value)
+        self.stats_hint.configure(
+            text=f"連殺 {stats.current_streak}（最佳 {stats.best_streak}）"
+            if stats.has_data
+            else "還沒有資料：進遊戲打一場就會開始累計"
         )
 
     # ------------------------------------------------------------ 表單存取
@@ -1507,6 +2522,7 @@ class DglabApp:
         changed = connection_fields_changed(self.config, config)
         self.config = config
         self.engine.apply_config(config)
+        self._apply_hotkeys(config)
         self._refresh_gsi_check(config)
         self._update_gsi_status(self._gsi_check)
         if changed:
@@ -1535,6 +2551,7 @@ class DglabApp:
             return
         self.config = config
         self.engine.apply_config(config)
+        self._apply_hotkeys(config)
         self._append_log(
             f"已存回 {self.config_path}（原檔備份為 {self.config_path}.bak）", "success"
         )
@@ -2014,6 +3031,9 @@ class DglabApp:
             ):
                 return
         self.engine.shutdown()
+        # 一定要把熱鍵取消掉，否則組合鍵會被這個已經結束的程式佔著
+        if hasattr(self, "_hotkeys"):
+            self._hotkeys.stop()
         self.root.destroy()
 
     # ------------------------------------------------------------ 週期更新
@@ -2055,12 +3075,16 @@ class DglabApp:
         except queue.Empty:
             pass
         self._drain_asset_results()
+        self._drain_update_result()
+        self._drain_hotkey_messages()
 
         status = self.engine.status
         self._update_status_bar(status)
         self._update_values(status)
         self._update_buttons(status)
         self._update_qr(status)
+        self._update_graph(status)
+        self._refresh_stats(status.stats)
 
         # GSI 設定可能被外部改動（自己動手裝、CS2 更新…），定期重掃一次
         self._ticks_since_gsi_check += 1
@@ -2068,8 +3092,146 @@ class DglabApp:
             self._refresh_gsi_check()
         self._update_gsi_status(self._gsi_check)
         self._update_discord_status()
+        self._maybe_check_update()
 
         self.root.after(self.POLL_MS, self._tick)
+
+    # ------------------------------------------------------------ 折線圖
+
+    def _update_graph(self, status) -> None:
+        if not hasattr(self, "graph"):
+            return
+        if status.health_known or self.engine.running:
+            self.graph.push(
+                status.strength,
+                status.health,
+                max(1, int(self.config.dglab.max_strength)),
+            )
+        # 每兩個 tick 重畫一次就好（150ms 畫一次對眼睛沒差，對 CPU 有差）
+        self._graph_tick = (self._graph_tick + 1) % 2
+        if self._graph_tick == 0:
+            self.graph.redraw()
+
+    # ------------------------------------------------------------ 全域熱鍵
+
+    def _setup_hotkeys(self) -> None:
+        self._hotkeys = hotkeys_module.HotkeyManager(self._on_hotkey)
+        self._apply_hotkeys(self.config)
+
+    def _apply_hotkeys(self, config: AppConfig) -> None:
+        """把設定裡的熱鍵註冊上去，失敗的會寫進事件紀錄。"""
+        if not hasattr(self, "_hotkeys"):
+            return
+        if not config.hotkeys.enabled:
+            self._hotkeys.clear()
+            return
+        failures = self._hotkeys.apply(config.hotkeys.bindings())
+        # 這是在 __init__ 期間也會被呼叫的路徑，所以進不去 UI 時只記錄
+        for key, message in failures.items():
+            label = dict(HOTKEY_ACTIONS).get(key, key)
+            self.log_queue.put(
+                ("error", f"熱鍵「{label}」註冊失敗：{message}", False)
+            )
+
+    def _on_hotkey(self, action: str) -> None:
+        """熱鍵觸發（在熱鍵的背景執行緒）。
+
+        碰 UI 或引擎一定要丟回主執行緒，所以這裡只放進佇列。
+        """
+        self._hotkey_queue.put(action)
+
+    def _drain_hotkey_messages(self) -> None:
+        try:
+            while True:
+                action = self._hotkey_queue.get_nowait()
+                self._handle_hotkey(action)
+        except queue.Empty:
+            pass
+
+    def _handle_hotkey(self, action: str) -> None:
+        if action == "emergency_stop":
+            self.engine.emergency_stop()
+            self._append_log("全域熱鍵：緊急停止", "warning")
+        elif action == "toggle_pause":
+            # _on_pause 自己會判斷要暫停還是繼續
+            self._on_pause()
+        elif action == "reset_stack":
+            self.engine.reset_stack()
+
+    # ------------------------------------------------------------ 檢查更新
+
+    def _maybe_check_update(self) -> None:
+        """每隔一段時間（或啟動時）問一次 GitHub。"""
+        config = self.config.update
+        if not config.enabled or not hasattr(self, "_update_thread"):
+            return
+        if self._update_thread is not None and self._update_thread.is_alive():
+            return
+        if not self._update_enabled_now:
+            return
+
+        now = time.monotonic()
+        if self._update_last_check is not None:
+            # 已經檢查過：只有在設定了間隔、而且真的過了一段時間才再查
+            if config.interval <= 0:
+                self._update_enabled_now = False
+                return
+            if now - self._update_last_check < config.interval:
+                return
+        self._update_last_check = now
+        self._update_thread = update_check.check_in_background(
+            PROJECT_VERSION,
+            self._update_queue.put,
+            timeout=config.timeout,
+        )
+
+    def _drain_update_result(self) -> None:
+        try:
+            result = self._update_queue.get_nowait()
+        except queue.Empty:
+            return
+        if result.status == update_check.Status.ERROR:
+            self._append_log(f"檢查更新失敗：{result.error}", "info")
+            return
+        if not result.available:
+            self._append_log(f"已是最新版本（{result.current}）", "info")
+            return
+        latest = result.latest
+        version = latest.version if latest else "?"
+        url = latest.url if latest else update_check.RELEASES_PAGE
+        self._append_log(f"有新版本 {version}（目前 {result.current}）→ {url}", "warning")
+        self._show_update_banner(version, url)
+
+    def _show_update_banner(self, version: str, url: str) -> None:
+        """在按鈕列下面顯示一條「有新版本」的提示（可點擊）。"""
+        if not hasattr(self, "update_banner"):
+            return
+        for child in self.update_banner.winfo_children():
+            child.destroy()
+        self.update_banner.columnconfigure(0, weight=1)
+        link = tk.Label(
+            self.update_banner,
+            text=f"\u2b06 有新版本 {version} —— 點這裡開啟下載頁面",
+            background=ACCENT_DARK,
+            foreground=ACCENT,
+            cursor="hand2",
+            padx=10,
+            pady=5,
+            font=self.font_bold,
+        )
+        link.grid(row=0, column=0, sticky="w")
+        link.bind("<Button-1>", lambda _event: webbrowser.open(url))
+        dismiss = tk.Label(
+            self.update_banner,
+            text="\u2715",
+            background=ACCENT_DARK,
+            foreground=TEXT_DIM,
+            cursor="hand2",
+            padx=8,
+        )
+        dismiss.grid(row=0, column=1, sticky="e")
+        dismiss.bind("<Button-1>", lambda _event: self.update_banner.grid_remove())
+        self.update_banner.grid()
 
     def _update_status_bar(self, status) -> None:
         # 「已連線」的燈號做緩慢的呼吸效果，一眼就看得出程式還活著

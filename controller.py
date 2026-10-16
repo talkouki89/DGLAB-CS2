@@ -14,7 +14,14 @@ from typing import TYPE_CHECKING
 from config import AppConfig
 from coyote.socket_protocol import Channel
 from game_events import GameEventTracker, GameEvents, PlayerSnapshot
-from strength import MODE_HIT_ONLY, OutputGate, StrengthPolicy, StrengthStack
+from stats import SessionStats
+from strength import (
+    MODE_HIT_ONLY,
+    KillStreak,
+    OutputGate,
+    StrengthPolicy,
+    StrengthStack,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     from coyote.socket_client import DglabSocketClient
@@ -44,6 +51,10 @@ class ControlDecision:
     taser_active: bool = False
     #: 是否因為死亡太久而被強制歸零
     dead_stopped: bool = False
+    #: 目前連殺數（連殺獎勵用）
+    streak: int = 0
+    #: 這一殺因為連殺獎勵而額外多扣的疊加值
+    streak_bonus: float = 0.0
 
     @property
     def should_update_device(self) -> bool:
@@ -63,6 +74,10 @@ class PlayerController:
     _died_at: float | None = field(default=None, init=False)
     #: 電擊槍加成到什麼時候為止
     _taser_until: float = field(default=0.0, init=False)
+    #: 連殺追蹤（跨週期保留，所以不能每次 apply_config 都重建）
+    streak: KillStreak = field(default_factory=KillStreak, init=False)
+    #: 本場統計
+    stats: SessionStats = field(default_factory=SessionStats, init=False)
 
     def __post_init__(self) -> None:
         self.apply_config(self.config)
@@ -70,7 +85,7 @@ class PlayerController:
     # ------------------------------------------------------------------ 設定
 
     def apply_config(self, config: AppConfig) -> None:
-        """熱套用設定（不會重置疊加值）。"""
+        """熱套用設定（不會重置疊加值與連殺數）。"""
         self.config = config
         self.policy: StrengthPolicy = config.dglab.policy
         self.stack: StrengthStack = config.dglab.stack
@@ -78,6 +93,13 @@ class PlayerController:
         self.taser = config.dglab.taser
         self.death_stop = config.dglab.death_stop
         self.max_strength: int = int(config.dglab.max_strength)
+
+        # 連殺的參數可以直接換，但「目前連殺數」要留著
+        streak_config = config.dglab.streak
+        self.streak.enabled = bool(streak_config.enabled)
+        self.streak.starts_at = int(streak_config.starts_at)
+        self.streak.bonus_per_kill = float(streak_config.bonus_per_kill)
+        self.streak.max_bonus = float(streak_config.max_bonus)
 
     # ------------------------------------------------------------------ 狀態
 
@@ -88,8 +110,13 @@ class PlayerController:
         self._taser_until = 0.0
 
     def reset_stack(self) -> None:
-        """把疊加值歸零。"""
+        """把疊加值與連殺數歸零。"""
         self.stack.reset()
+        self.streak.reset()
+
+    def reset_stats(self) -> None:
+        """把本場統計歸零（但不動遊戲進行中的疊加值）。"""
+        self.stats.reset()
 
     @property
     def previous_snapshot(self) -> PlayerSnapshot | None:
@@ -113,10 +140,14 @@ class PlayerController:
         if events.died:
             self.stack.apply_death()
             self.gate.on_death(now)
+            self.streak.register_death()
         elif events.damage > 0:
             self.gate.on_hit(now, damage=events.damage)
+        streak_bonus = 0.0
         if events.kills:
-            self.stack.apply_kills(events.kills)
+            # 連殺獎勵：連續擊殺時，這一殺扣掉的疊加值會越來越多
+            streak_bonus = self.streak.register_kills(events.kills)
+            self.stack.apply_kills(events.kills, extra=streak_bonus)
 
         # --- 電擊槍：單次掉血達到門檻就啟動一段加成時間窗 ---
         taser_hit = (
@@ -165,6 +196,17 @@ class PlayerController:
             output_active = False
             burst_seconds = None
 
+        self.stats.record(
+            now,
+            strength=strength,
+            output_active=output_active,
+            died=events.died,
+            kills=events.kills,
+            damage=events.damage,
+            taser_hit=taser_hit,
+            streak=self.streak.count,
+        )
+
         return ControlDecision(
             strength=strength,
             output_active=output_active,
@@ -176,6 +218,8 @@ class PlayerController:
             burst_seconds=burst_seconds,
             taser_active=taser_active,
             dead_stopped=dead_stopped,
+            streak=self.streak.count,
+            streak_bonus=streak_bonus,
         )
 
     def describe(self, snapshot: PlayerSnapshot, decision: ControlDecision) -> str:
@@ -189,6 +233,10 @@ class PlayerController:
             parts.append("復活")
         if decision.events.kills:
             parts.append(f"擊殺 +{decision.events.kills}")
+            if decision.streak_bonus:
+                parts.append(f"連殺 x{decision.streak} +{decision.streak_bonus:.0f}")
+            elif decision.streak > 1:
+                parts.append(f"連殺 x{decision.streak}")
         if decision.taser_active:
             parts.append(f"電擊槍 {self.taser.strength}")
         if decision.dead_stopped:

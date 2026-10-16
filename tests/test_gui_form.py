@@ -13,6 +13,7 @@ from coyote.waveform import PRESET_NAMES
 from gui import (
     FIELDS,
     FIELD_BY_KEY,
+    TAB_ORDER,
     connection_fields_changed,
     config_from_form,
     form_values,
@@ -54,7 +55,12 @@ class FormRoundTripTests(unittest.TestCase):
 
     def test_tabs_are_all_used(self):
         tabs = {field.tab for field in FIELDS}
-        self.assertEqual(tabs, {"基本", "疊加", "輸出", "波形", "連線", "Discord"})
+        self.assertEqual(
+            tabs,
+            {"基本", "疊加", "輸出", "波形", "連線", "Discord", "熱鍵", "更新"},
+        )
+        # TAB_ORDER 決定分頁順序，每個分頁都必須真的有欄位
+        self.assertEqual(set(TAB_ORDER), tabs)
 
     def test_discord_round_trip(self):
         config = config_from_form(

@@ -12,6 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+from stats import SessionStats
+
 
 class EngineState(str, Enum):
     """引擎狀態。"""
@@ -70,6 +72,11 @@ class EngineStatus:
     stack: float = 0.0
     output_active: bool = False
     last_event: str = ""
+
+    #: 目前連殺數
+    streak: int = 0
+    #: 本場統計的快照（唯讀；每個週期換一份新的）
+    stats: SessionStats | None = None
 
     error: str | None = None
 

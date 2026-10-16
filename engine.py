@@ -287,11 +287,25 @@ class ControlEngine:
         self._wake_control_loop()
 
     def reset_stack(self) -> None:
-        """把死亡／擊殺累積的疊加值歸零。"""
+        """把死亡／擊殺累積的疊加值與連殺數歸零。"""
         self._controller.reset_stack()
-        self._set(stack=0.0)
-        self.log("強度疊加已歸零")
+        self._set(stack=0.0, streak=0)
+        self.log("強度疊加與連殺數已歸零")
         self._wake_control_loop()
+
+    def reset_stats(self) -> None:
+        """把本場統計歸零（不影響正在跑的電擊邏輯）。"""
+        self._controller.reset_stats()
+        self._set(stats=dataclasses.replace(self._controller.stats))
+
+    def emergency_stop(self) -> None:
+        """緊急停止：立刻歸零並暫停輸出。
+
+        給全域熱鍵用。會直接寫裝置（不等控制迴圈），所以人在 CS2 裡按下去
+        也能馬上停。
+        """
+        self.pause()
+        self.log("緊急停止：強度已歸零並暫停輸出", "warning")
 
     def apply_config(self, config: AppConfig) -> None:
         """熱套用設定（連線層級的項目要重新啟動才會生效）。"""
@@ -578,6 +592,8 @@ class ControlEngine:
                 ),
                 stack=decision.stack,
                 output_active=decision.output_active,
+                streak=decision.streak,
+                stats=dataclasses.replace(self._controller.stats),
                 last_event=(
                     self._controller.describe(snapshot, decision)
                     if decision.events.has_event

@@ -48,6 +48,7 @@ def config_values(config: AppConfig) -> dict[str, dict[str, Any]]:
     dglab = config.dglab
     policy = dglab.policy
     stack = dglab.stack
+    streak = dglab.streak
     gate = dglab.output
     return {
         "": {"debug": config.debug},
@@ -80,6 +81,10 @@ def config_values(config: AppConfig) -> dict[str, dict[str, Any]]:
             "stack_kill_reduction": stack.kill_reduction,
             "stack_min": stack.minimum,
             "stack_max": stack.maximum,
+            "streak_enabled": streak.enabled,
+            "streak_starts_at": streak.starts_at,
+            "streak_bonus_per_kill": streak.bonus_per_kill,
+            "streak_max_bonus": streak.max_bonus,
             "output_mode": gate.mode,
             "hit_duration": gate.hit_duration,
             "hit_boost": gate.hit_boost,
@@ -107,6 +112,18 @@ def config_values(config: AppConfig) -> dict[str, dict[str, Any]]:
             "large_text": config.discord.large_text,
             "small_image": config.discord.small_image,
             "small_text": config.discord.small_text,
+        },
+        "hotkeys": {
+            "enabled": config.hotkeys.enabled,
+            "emergency_stop": config.hotkeys.emergency_stop,
+            "toggle_pause": config.hotkeys.toggle_pause,
+            "reset_stack": config.hotkeys.reset_stack,
+        },
+        "update": {
+            "enabled": config.update.enabled,
+            "check_on_start": config.update.check_on_start,
+            "interval": config.update.interval,
+            "timeout": config.update.timeout,
         },
     }
 

@@ -90,6 +90,22 @@ stack_kill_reduction = 2
 stack_min = 0
 stack_max = 30
 
+# --- 連殺獎勵 ---
+
+# 連續擊殺（中間沒有死）時，每一殺扣掉的疊加值會越來越多。
+# 例如連殺到第 4 殺時，那一殺會額外多扣 3（2 倍 + 1 倍的獎勵）。
+# 死亡會把連殺數歸零，獎勵要重新累積。
+streak_enabled = true
+
+# 從第幾殺開始算獎勵（2 = 第二殺開始）
+streak_starts_at = 2
+
+# 每多一殺，這一殺再多扣多少疊加值
+streak_bonus_per_kill = 1.0
+
+# 單次額外扣減的上限
+streak_max_bonus = 6.0
+
 # --- 功能二：受擊同步電擊 ---
 
 # continuous = 一直輸出，強度隨血量變化（原本的行為）
@@ -193,4 +209,41 @@ large_text = "DGLAB-CS2"
 
 small_image = "cs2-logo"
 small_text = "Counter-Strike 2"
+
+
+# ----------------------------------------------------------------- 熱鍵 ---
+[hotkeys]
+# 全域熱鍵：即使 CS2 是前景視窗也有效，緊急時不必先切回本程式。
+#
+# 格式是「修飾鍵 + 按鍵」，至少要有一個修飾鍵，例如：
+#   ctrl+alt+s、ctrl+shift+f5、alt+f12、ctrl+win+space
+# 按鍵可以是 a-z、0-9、f1-f24、space、enter、esc、pageup、pagedown、
+# 方向鍵（up/down/left/right）等等。
+#
+# 留空字串 "" 代表不綁定。也可以直接在介面的「熱鍵」分頁按「錄製」。
+enabled = true
+
+# 緊急停止：立刻把強度歸零並暫停輸出
+emergency_stop = "ctrl+alt+s"
+
+# 暫停／繼續
+toggle_pause = "ctrl+alt+p"
+
+# 疊加值與連殺數歸零
+reset_stack = ""
+
+
+# --------------------------------------------------------------- 自動更新 ---
+[update]
+# 啟動時問一次 GitHub 有沒有新版本。只是「提示」，不會自動下載或安裝。
+enabled = true
+
+# 啟動時檢查
+check_on_start = true
+
+# 之後每隔幾秒再檢查一次（0 = 只檢查啟動那一次）
+interval = 0.0
+
+# 連線逾時（秒）
+timeout = 10.0
 
