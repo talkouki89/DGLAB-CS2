@@ -2898,6 +2898,8 @@ class DglabApp:
 
         action = "已建立" if result.created else "已更新"
         self._append_log(f"{action} GSI 設定：{result.path}", "success")
+        # 靜默更新（confirm=False）時不要再跳「安裝完成」——
+        # 使用者要求「裝過就自動覆蓋，不用通知」。
         if result.backup is not None:
             self._append_log(f"原本的檔案已備份為 {result.backup.name}")
 
@@ -2918,7 +2920,10 @@ class DglabApp:
                 lines.append(f"  • {cfg.filename}")
                 lines.append(f"      uri={cfg.uri}  token={cfg.token}")
             lines += ["", "建議把它們移走或改名（例如加上 .disabled）。"]
-        messagebox.showinfo("安裝完成", "\n".join(lines), parent=self.root)
+        # 靜默更新（confirm=False）時不跳這個框 ——
+        # 使用者要求「已經裝過就自動覆蓋，不用通知」。
+        if confirm:
+            messagebox.showinfo("安裝完成", "\n".join(lines), parent=self.root)
         self._refresh_gsi_check(config)
         self._update_gsi_status(self._gsi_check)
         return True
