@@ -60,11 +60,28 @@ from strength import MODE_CONTINUOUS, MODE_HIT_ONLY, OutputGate, StrengthPolicy,
 
 logger = logging.getLogger("dglab-cs2.gui")
 
+# ------------------------------------------------------------------ 配色
+#
+# 深色主題。重點是「一眼看得出狀態」：連線是青色、警告是琥珀、錯誤是紅。
+# 輸入框比背景亮一階，這樣不用畫框線也看得出可以打字。
+
+BG = "#0f0f17"          # 視窗底色
+SURFACE = "#1a1a28"     # 分頁／卡片
+SURFACE2 = "#232336"    # 輸入框
+SURFACE3 = "#2e2e46"    # 滑鼠移過去
+BORDER = "#33334d"
+TEXT = "#e8e8f4"
+TEXT_DIM = "#8a8aa8"
+ACCENT = "#22d3ee"      # 青：電
+ACCENT_DARK = "#0b3b47"
+PINK = "#f472b6"        # 血量
+ORANGE = "#fb923c"      # 燃燒
+
 #: 狀態燈號顏色
-COLOR_OK = "#2e7d32"
-COLOR_OFF = "#9e9e9e"
-COLOR_WARN = "#ef6c00"
-COLOR_BAD = "#c62828"
+COLOR_OK = "#34d399"
+COLOR_OFF = "#4b4b66"
+COLOR_WARN = "#fbbf24"
+COLOR_BAD = "#f87171"
 
 #: 連線層級的欄位：改了要重新啟動才會生效
 CONNECTION_FIELDS = (
@@ -611,6 +628,8 @@ class DglabApp:
         self._stopping = False
         self._gsi_check: cs2cfg.GsiCheck | None = None
         self._ticks_since_gsi_check = 0
+        #: 狀態燈號呼吸效果用的計數器
+        self._pulse_tick = 0
         #: 查到的 Discord 圖片素材（依 Application ID 快取）
         self._discord_assets: dict[str, tuple] = {}
         self._assets_fetching = False
@@ -621,6 +640,7 @@ class DglabApp:
         self._discord_note = ""
 
         self._build_style()
+        self._apply_window_icon()
         self._build_layout()
         self._load_form(config)
         self._append_log(
@@ -655,20 +675,201 @@ class DglabApp:
     # ------------------------------------------------------------ 畫面建立
 
     def _build_style(self) -> None:
+        """深色主題。
+
+        用 ``clam`` 當基底 —— 內建的 vista／winnative 是走系統繪製的，
+        大部分顏色選項會被忽略，只有 clam 能完整換色。
+        """
         style = ttk.Style()
-        for theme in ("vista", "winnative", "clam"):
-            if theme in style.theme_names():
-                style.theme_use(theme)
-                break
+        if "clam" in style.theme_names():
+            style.theme_use("clam")
+
         self.font_normal = ("Microsoft JhengHei UI", 10)
         self.font_small = ("Microsoft JhengHei UI", 9)
         self.font_bold = ("Microsoft JhengHei UI", 10, "bold")
         self.font_title = ("Microsoft JhengHei UI", 13, "bold")
-        style.configure(".", font=self.font_normal)
-        style.configure("Title.TLabel", font=self.font_title)
-        style.configure("Hint.TLabel", font=self.font_small, foreground="#666666")
-        style.configure("Big.TLabel", font=("Microsoft JhengHei UI", 15, "bold"))
-        style.configure("Primary.TButton", font=self.font_bold)
+        self.font_huge = ("Microsoft JhengHei UI", 19, "bold")
+        self.font_mono = ("Consolas", 10)
+
+        style.configure(
+            ".",
+            font=self.font_normal,
+            background=BG,
+            foreground=TEXT,
+            fieldbackground=SURFACE2,
+            bordercolor=BORDER,
+            focuscolor=BG,
+            lightcolor=SURFACE,
+            darkcolor=SURFACE,
+            troughcolor=SURFACE2,
+            arrowcolor=TEXT_DIM,
+        )
+
+        # --- 基本元件 ---
+        style.configure("TFrame", background=BG)
+        style.configure("TLabel", background=BG, foreground=TEXT)
+        style.configure("TSeparator", background=BORDER)
+
+        style.configure(
+            "TLabelframe",
+            background=BG,
+            bordercolor=BORDER,
+            relief="solid",
+            borderwidth=1,
+        )
+        style.configure(
+            "TLabelframe.Label",
+            background=BG,
+            foreground=ACCENT,
+            font=self.font_bold,
+        )
+
+        # --- 文字樣式 ---
+        style.configure("Title.TLabel", font=self.font_title, background=BG, foreground=TEXT)
+        style.configure("Hint.TLabel", font=self.font_small, background=BG, foreground=TEXT_DIM)
+        style.configure("Big.TLabel", font=self.font_huge, background=BG, foreground=ACCENT)
+        style.configure("Caption.TLabel", font=self.font_small, background=BG, foreground=TEXT_DIM)
+        style.configure("Value.TLabel", font=self.font_bold, background=BG, foreground=TEXT)
+        style.configure("Info.TLabel", background=BG, foreground=TEXT)
+        style.configure("Warn.TLabel", background=BG, foreground=COLOR_WARN)
+
+        # --- 按鈕 ---
+        style.configure(
+            "TButton",
+            background=SURFACE2,
+            foreground=TEXT,
+            bordercolor=BORDER,
+            padding=(8, 4),
+            relief="flat",
+        )
+        style.map(
+            "TButton",
+            background=[("pressed", ACCENT_DARK), ("active", SURFACE3), ("disabled", SURFACE)],
+            foreground=[("disabled", "#5a5a78"), ("active", ACCENT)],
+        )
+        # 主要動作（例如對話框裡的「立即安裝」）
+        style.configure(
+            "Primary.TButton",
+            font=self.font_bold,
+            background=ACCENT,
+            foreground="#06232b",
+            bordercolor=ACCENT,
+        )
+        style.map(
+            "Primary.TButton",
+            background=[("pressed", "#0e7490"), ("active", "#67e8f9")],
+            foreground=[("active", "#06232b")],
+        )
+        # 危險動作（結束、緊急停止）
+        style.configure("Danger.TButton", foreground=COLOR_BAD)
+        style.map("Danger.TButton", foreground=[("active", "#fca5a5")])
+
+        # --- 輸入類 ---
+        for name in ("TEntry", "TCombobox"):
+            style.configure(
+                name,
+                fieldbackground=SURFACE2,
+                background=SURFACE2,
+                foreground=TEXT,
+                insertcolor=ACCENT,
+                bordercolor=BORDER,
+                lightcolor=BORDER,
+                darkcolor=BORDER,
+                arrowcolor=TEXT_DIM,
+                padding=3,
+            )
+        style.map(
+            "TEntry",
+            bordercolor=[("focus", ACCENT)],
+            lightcolor=[("focus", ACCENT)],
+            darkcolor=[("focus", ACCENT)],
+        )
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", SURFACE2), ("disabled", SURFACE)],
+            foreground=[("disabled", COLOR_OFF)],
+            bordercolor=[("focus", ACCENT)],
+            arrowcolor=[("active", ACCENT)],
+        )
+        # 下拉清單是傳統 Tk 元件，只能用 option database 改
+        self.root.option_add("*TCombobox*Listbox.background", SURFACE2)
+        self.root.option_add("*TCombobox*Listbox.foreground", TEXT)
+        self.root.option_add("*TCombobox*Listbox.selectBackground", ACCENT)
+        self.root.option_add("*TCombobox*Listbox.selectForeground", "#06232b")
+        self.root.option_add("*TCombobox*Listbox.borderWidth", 0)
+
+        style.configure(
+            "TCheckbutton",
+            background=BG,
+            foreground=TEXT,
+            indicatorcolor=SURFACE2,
+            focuscolor=BG,
+            padding=2,
+        )
+        style.map(
+            "TCheckbutton",
+            background=[("active", BG)],
+            foreground=[("active", ACCENT), ("disabled", COLOR_OFF)],
+            indicatorcolor=[("selected", ACCENT), ("active", SURFACE3)],
+        )
+        # 註：實際上 bool 欄位用的是 tk.Checkbutton（見 _fill_tab）。
+        # clam 的 ttk 勾選框在深色底上會畫成一個打叉的方框，很難看懂。
+
+        # --- 分頁 ---
+        style.configure("TNotebook", background=BG, bordercolor=BORDER, tabmargins=(2, 4, 2, 0))
+        style.configure(
+            "TNotebook.Tab",
+            background=SURFACE,
+            foreground=TEXT_DIM,
+            padding=(14, 5),
+            bordercolor=BORDER,
+            font=self.font_bold,
+        )
+        style.map(
+            "TNotebook.Tab",
+            background=[("selected", BG)],
+            foreground=[("selected", ACCENT)],
+            expand=[("selected", (0, 0, 0, 0))],
+        )
+
+        # --- 進度條（顏色代表意義，見 _update_values）---
+        for name, color in (
+            ("Health", PINK),
+            ("Burning", ORANGE),
+            ("Strength", ACCENT),
+            ("StrengthWarn", COLOR_WARN),
+            ("StrengthBad", COLOR_BAD),
+        ):
+            style.configure(
+                f"{name}.Horizontal.TProgressbar",
+                background=color,
+                troughcolor=SURFACE2,
+                bordercolor=SURFACE2,
+                lightcolor=color,
+                darkcolor=color,
+            )
+
+        # --- 捲軸 ---
+        style.configure("TScrollbar", background=SURFACE2, troughcolor=BG, bordercolor=BG)
+        style.map("TScrollbar", background=[("active", ACCENT), ("pressed", ACCENT_DARK)])
+
+        self.root.configure(background=BG)
+
+    def _apply_window_icon(self) -> None:
+        """設定視窗左上角的圖示（找不到就沿用預設的）。"""
+        candidates = [
+            app_directory() / "assets" / "icon.ico",
+            Path(__file__).resolve().parent / "assets" / "icon.ico",
+        ]
+        if getattr(sys, "_MEIPASS", None):
+            candidates.insert(0, Path(sys._MEIPASS) / "assets" / "icon.ico")
+        for path in candidates:
+            try:
+                if path.is_file():
+                    self.root.iconbitmap(default=str(path))
+                    return
+            except (tk.TclError, OSError):  # pragma: no cover - 非 Windows
+                continue
 
     def _build_layout(self) -> None:
         root = self.root
@@ -682,24 +883,29 @@ class DglabApp:
         self._build_log()
 
     def _build_status_bar(self) -> None:
-        frame = ttk.Frame(self.root, padding=(12, 10, 12, 0))
+        frame = ttk.Frame(self.root, padding=(12, 0, 12, 0))
         frame.grid(row=0, column=0, sticky="ew")
         for column in range(4):
             frame.columnconfigure(column, weight=1)
-        self.socket_status = self._status_cell(frame, 0, "Socket 服務端")
-        self.pair_status = self._status_cell(frame, 1, "DG-LAB App")
-        self.cs2_status = self._status_cell(frame, 2, "CS2 資料")
-        self.gsi_status = self._status_cell(frame, 3, "GSI 設定")
+        # 最上面一條青色細線，像電源指示燈
+        accent = tk.Frame(frame, height=3, background=ACCENT)
+        accent.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 10))
+        self.socket_status = self._status_cell(frame, 0, "Socket 服務端", row=1)
+        self.pair_status = self._status_cell(frame, 1, "DG-LAB App", row=1)
+        self.cs2_status = self._status_cell(frame, 2, "CS2 資料", row=1)
+        self.gsi_status = self._status_cell(frame, 3, "GSI 設定", row=1)
 
-    def _status_cell(self, parent: ttk.Frame, column: int, caption: str) -> StatusCell:
+    def _status_cell(
+        self, parent: ttk.Frame, column: int, caption: str, *, row: int = 0
+    ) -> StatusCell:
         cell = ttk.Frame(parent)
-        cell.grid(row=0, column=column, sticky="w")
-        dot = ttk.Label(cell, text="\u25cf", foreground=COLOR_OFF, font=("Segoe UI", 14))
+        cell.grid(row=row, column=column, sticky="w")
+        dot = ttk.Label(cell, text="\u25cf", foreground=COLOR_OFF, font=("Segoe UI", 15))
         dot.grid(row=0, column=0, rowspan=2, padx=(0, 6))
-        ttk.Label(cell, text=caption, font=self.font_small, foreground="#666666").grid(
+        ttk.Label(cell, text=caption, style="Caption.TLabel").grid(
             row=0, column=1, sticky="w"
         )
-        value = ttk.Label(cell, text="—", font=self.font_bold)
+        value = ttk.Label(cell, text="—", style="Value.TLabel")
         value.grid(row=1, column=1, sticky="w")
         return StatusCell(frame=cell, dot=dot, value=value)
 
@@ -722,24 +928,24 @@ class DglabApp:
     def _build_qr_box(self, parent: ttk.Frame) -> None:
         qr_box = ttk.LabelFrame(parent, text=" 配對 QR code ", padding=8)
         qr_box.grid(row=0, column=0, sticky="nsew")
+        # QR code 一定要白底黑方塊才掃得到，所以只有這一塊不用深色
         self.qr_canvas = tk.Canvas(
             qr_box,
             width=self.QR_SIZE,
             height=self.QR_SIZE,
             background="white",
-            highlightthickness=1,
-            highlightbackground="#cccccc",
+            highlightthickness=2,
+            highlightbackground=ACCENT,
         )
         self.qr_canvas.grid(row=0, column=0, columnspan=2)
         self.qr_hint = ttk.Label(
             qr_box,
             text="啟動後會顯示 QR code",
-            font=self.font_small,
-            foreground="#666666",
+            style="Caption.TLabel",
             wraplength=self.QR_SIZE,
             justify="center",
         )
-        self.qr_hint.grid(row=1, column=0, columnspan=2, pady=(6, 4))
+        self.qr_hint.grid(row=1, column=0, columnspan=2, pady=(8, 4))
         ttk.Button(qr_box, text="複製連結", command=self._copy_qr_link, width=12).grid(
             row=2, column=0, padx=(0, 4)
         )
@@ -754,11 +960,17 @@ class DglabApp:
         info.grid(row=0, column=0, sticky="ew")
         info.columnconfigure(1, weight=1)
 
-        self.health_bar, self.health_text = self._value_row(info, 0, "血量")
-        self.burning_bar, self.burning_text = self._value_row(info, 1, "燃燒")
-        self.strength_bar, self.strength_text = self._value_row(info, 2, "強度")
+        self.health_bar, self.health_text = self._value_row(
+            info, 0, "血量", style="Health.Horizontal.TProgressbar"
+        )
+        self.burning_bar, self.burning_text = self._value_row(
+            info, 1, "燃燒", style="Burning.Horizontal.TProgressbar"
+        )
+        self.strength_bar, self.strength_text = self._value_row(
+            info, 2, "強度", style="Strength.Horizontal.TProgressbar", big=True
+        )
 
-        ttk.Separator(info).grid(row=3, column=0, columnspan=3, sticky="ew", pady=6)
+        ttk.Separator(info).grid(row=3, column=0, columnspan=3, sticky="ew", pady=8)
 
         self.stack_text = self._info_row(info, 4, "強度疊加", "0.0")
         self.output_text = self._info_row(info, 5, "輸出狀態", "未出力")
@@ -766,16 +978,24 @@ class DglabApp:
         self.wave_text = self._info_row(info, 7, "波形", "—")
         self.event_text = self._info_row(info, 8, "最近事件", "—")
 
-    def _value_row(self, parent: ttk.Frame, row: int, caption: str):
+    def _value_row(
+        self, parent: ttk.Frame, row: int, caption: str, *, style: str, big: bool = False
+    ):
         ttk.Label(parent, text=caption, width=8).grid(row=row, column=0, sticky="w")
-        bar = ttk.Progressbar(parent, maximum=100, length=200)
-        bar.grid(row=row, column=1, sticky="ew", padx=6, pady=2)
-        value = ttk.Label(parent, text="—", width=12, font=self.font_bold)
+        bar = ttk.Progressbar(parent, maximum=100, length=200, style=style)
+        bar.grid(row=row, column=1, sticky="ew", padx=8, pady=3)
+        value = ttk.Label(
+            parent,
+            text="—",
+            width=11 if big else 12,
+            font=self.font_huge if big else self.font_bold,
+            foreground=ACCENT if big else TEXT,
+        )
         value.grid(row=row, column=2, sticky="e")
         return bar, value
 
     def _info_row(self, parent: ttk.Frame, row: int, caption: str, initial: str):
-        ttk.Label(parent, text=caption, width=8, foreground="#666666").grid(
+        ttk.Label(parent, text=caption, width=8, style="Caption.TLabel").grid(
             row=row, column=0, sticky="w"
         )
         label = ttk.Label(parent, text=initial, wraplength=430, justify="left")
@@ -800,8 +1020,19 @@ class DglabApp:
             row=0, column=3, padx=6
         )
         self.dry_run_var = tk.BooleanVar(value=self.dry_run)
-        self.dry_run_check = ttk.Checkbutton(
-            bar, text="模擬模式", variable=self.dry_run_var, command=self._on_toggle_dry_run
+        self.dry_run_check = tk.Checkbutton(
+            bar,
+            text="模擬模式",
+            variable=self.dry_run_var,
+            command=self._on_toggle_dry_run,
+            background=BG,
+            foreground=TEXT,
+            activebackground=BG,
+            activeforeground=ACCENT,
+            selectcolor=SURFACE2,
+            highlightthickness=0,
+            borderwidth=0,
+            cursor="hand2",
         )
         self.dry_run_check.grid(row=0, column=4, padx=(14, 6))
 
@@ -862,12 +1093,27 @@ class DglabApp:
         for field in FIELDS:
             if field.tab != tab_name:
                 continue
-            ttk.Label(tab, text=field.label, width=13, anchor="w").grid(
-                row=row, column=0, sticky="w", pady=4
+            # 不給固定寬度：Tk 的寬度單位是「平均字元寬」，中文比它寬，
+            # 給固定值反而會把標籤裁掉。讓欄寬自己長到最寬的標籤就好。
+            ttk.Label(tab, text=field.label, anchor="w").grid(
+                row=row, column=0, sticky="w", pady=4, padx=(0, 12)
             )
             if field.kind == "bool":
                 var: tk.Variable = tk.BooleanVar()
-                ttk.Checkbutton(tab, variable=var).grid(row=row, column=1, sticky="w")
+                check = tk.Checkbutton(
+                    tab,
+                    variable=var,
+                    background=BG,
+                    foreground=TEXT,
+                    activebackground=BG,
+                    activeforeground=ACCENT,
+                    selectcolor=SURFACE2,
+                    highlightthickness=0,
+                    borderwidth=0,
+                    cursor="hand2",
+                )
+                check.grid(row=row, column=1, sticky="w")
+                self.vars["__widget__" + field.key] = check
             elif field.kind == "choice":
                 var = tk.StringVar()
                 combo = ttk.Combobox(
@@ -1098,7 +1344,22 @@ class DglabApp:
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(0, weight=1)
 
-        self.log_text = tk.Text(frame, height=6, wrap="word", state="disabled", font=("Consolas", 9))
+        self.log_text = tk.Text(
+            frame,
+            height=6,
+            wrap="word",
+            state="disabled",
+            font=("Consolas", 9),
+            background=SURFACE,
+            foreground=TEXT,
+            insertbackground=ACCENT,
+            selectbackground=ACCENT_DARK,
+            selectforeground=TEXT,
+            relief="flat",
+            borderwidth=0,
+            padx=8,
+            pady=6,
+        )
         self.log_text.grid(row=0, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(frame, command=self.log_text.yview)
         scroll.grid(row=0, column=1, sticky="ns")
@@ -1106,7 +1367,7 @@ class DglabApp:
         self.log_text.tag_configure("success", foreground=COLOR_OK)
         self.log_text.tag_configure("warning", foreground=COLOR_WARN)
         self.log_text.tag_configure("error", foreground=COLOR_BAD)
-        self.log_text.tag_configure("info", foreground="#333333")
+        self.log_text.tag_configure("info", foreground=TEXT_DIM)
 
         ttk.Button(frame, text="清除紀錄", command=self._clear_log, width=10).grid(
             row=1, column=0, sticky="e", pady=(6, 0)
@@ -1318,7 +1579,7 @@ class DglabApp:
         height: int = 14,
     ) -> str:
         """跳出一個有多個選項的對話框，回傳被選到的 key。"""
-        dialog = tk.Toplevel(self.root)
+        dialog = tk.Toplevel(self.root, background=BG)
         dialog.title(title)
         dialog.transient(self.root)
         dialog.grab_set()
@@ -1329,7 +1590,18 @@ class DglabApp:
         ).grid(row=0, column=0, sticky="w")
         if details:
             box = tk.Text(
-                dialog, width=88, height=height, wrap="none", font=("Consolas", 9)
+                dialog,
+                width=88,
+                height=height,
+                wrap="none",
+                font=("Consolas", 9),
+                background=SURFACE,
+                foreground=TEXT_DIM,
+                insertbackground=ACCENT,
+                relief="flat",
+                borderwidth=0,
+                padx=10,
+                pady=8,
             )
             box.grid(row=1, column=0, sticky="nsew", padx=12)
             box.insert("1.0", details)
@@ -1536,12 +1808,25 @@ class DglabApp:
 
     def _choose_directory(self, title: str, options: list[Path]) -> Path | None:
         """讓使用者從清單挑一個資料夾。"""
-        dialog = tk.Toplevel(self.root)
+        dialog = tk.Toplevel(self.root, background=BG)
         dialog.title("選擇資料夾")
         dialog.transient(self.root)
         dialog.grab_set()
         ttk.Label(dialog, text=title, padding=10).pack(anchor="w")
-        listbox = tk.Listbox(dialog, width=78, height=min(8, len(options)))
+        listbox = tk.Listbox(
+            dialog,
+            width=78,
+            height=min(8, len(options)),
+            background=SURFACE,
+            foreground=TEXT,
+            selectbackground=ACCENT,
+            selectforeground="#06232b",
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            activestyle="none",
+            font=self.font_normal,
+        )
         for option in options:
             listbox.insert("end", str(option))
         listbox.selection_set(0)
@@ -1609,7 +1894,7 @@ class DglabApp:
 
     def _show_tutorial(self) -> None:
         """顯示使用教學。"""
-        window = tk.Toplevel(self.root)
+        window = tk.Toplevel(self.root, background=BG)
         window.title(f"{tutorial.TUTORIAL_TITLE} — DGLAB-CS2")
         window.transient(self.root)
         frame = ttk.Frame(window, padding=10)
@@ -1617,12 +1902,40 @@ class DglabApp:
         frame.rowconfigure(0, weight=1)
         frame.columnconfigure(0, weight=1)
 
-        text = tk.Text(frame, wrap="word", width=82, height=34, font=self.font_normal)
+        text = tk.Text(
+            frame,
+            wrap="word",
+            width=82,
+            height=34,
+            font=self.font_normal,
+            background=SURFACE,
+            foreground=TEXT,
+            insertbackground=ACCENT,
+            selectbackground=ACCENT_DARK,
+            selectforeground=TEXT,
+            relief="flat",
+            borderwidth=0,
+            padx=12,
+            pady=10,
+        )
         text.grid(row=0, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(frame, command=text.yview)
         scroll.grid(row=0, column=1, sticky="ns")
         text.configure(yscrollcommand=scroll.set)
         text.insert("1.0", tutorial.TUTORIAL_TEXT)
+        # 標題與分隔線加一點顏色，長文件比較好讀
+        text.tag_configure("heading", foreground=ACCENT, font=self.font_bold)
+        text.tag_configure("rule", foreground=BORDER)
+        lines = tutorial.TUTORIAL_TEXT.splitlines()
+        for index, line in enumerate(lines, start=1):
+            stripped = line.strip()
+            if stripped and not set(stripped) - set("─"):
+                text.tag_add("rule", f"{index}.0", f"{index}.end")
+                continue
+            next_line = lines[index].strip() if index < len(lines) else ""
+            prev_line = lines[index - 2].strip() if index >= 2 else ""
+            if set(next_line) == {"="} or (prev_line and not set(prev_line) - set("─")):
+                text.tag_add("heading", f"{index}.0", f"{index}.end")
         text.configure(state="disabled")
 
         bar = ttk.Frame(frame)
@@ -1759,6 +2072,10 @@ class DglabApp:
         self.root.after(self.POLL_MS, self._tick)
 
     def _update_status_bar(self, status) -> None:
+        # 「已連線」的燈號做緩慢的呼吸效果，一眼就看得出程式還活著
+        self._pulse_tick = (self._pulse_tick + 1) % 8
+        alive = COLOR_OK if self._pulse_tick < 4 else "#1c7a5c"
+
         if status.error:
             self.socket_status.set(COLOR_BAD, f"錯誤  {status.socket_uri}")
         elif not self.engine.running:
@@ -1766,10 +2083,10 @@ class DglabApp:
         elif status.state is EngineState.STARTING:
             self.socket_status.set(COLOR_WARN, f"啟動中  {status.socket_uri}")
         else:
-            self.socket_status.set(COLOR_OK, f"已連線  {status.socket_uri}")
+            self.socket_status.set(alive, f"已連線  {status.socket_uri}")
 
         if status.paired:
-            self.pair_status.set(COLOR_OK, "已配對")
+            self.pair_status.set(alive, "已配對")
         elif self.engine.running:
             self.pair_status.set(COLOR_WARN, "等待掃碼")
         else:
@@ -1792,15 +2109,26 @@ class DglabApp:
         self.burning_bar.configure(value=min(255, status.burning) / 2.55)
         self.burning_text.configure(text=f"{status.burning} / 255")
 
+        # 強度：數字放大，而且越接近上限顏色越警示
         maximum = max(1, int(self.config.dglab.policy.max_strength))
-        self.strength_bar.configure(maximum=maximum, value=min(status.strength, maximum))
-        self.strength_text.configure(text=f"{status.strength} / {maximum}")
+        value = min(status.strength, maximum)
+        ratio = value / maximum
+        if ratio >= 0.8:
+            bar_style, color = "StrengthBad.Horizontal.TProgressbar", COLOR_BAD
+        elif ratio >= 0.55:
+            bar_style, color = "StrengthWarn.Horizontal.TProgressbar", COLOR_WARN
+        else:
+            bar_style, color = "Strength.Horizontal.TProgressbar", ACCENT
+        self.strength_bar.configure(
+            maximum=maximum, value=value, style=bar_style
+        )
+        self.strength_text.configure(text=f"{value} / {maximum}", foreground=color)
 
         self.stack_text.configure(text=f"{status.stack:+.1f}")
         if status.output_active:
             self.output_text.configure(text="\u25cf 出力中", foreground=COLOR_OK)
         else:
-            self.output_text.configure(text="\u25cb 未出力", foreground="#666666")
+            self.output_text.configure(text="\u25cb 未出力", foreground=TEXT_DIM)
 
         if status.app_strength is not None:
             a, b = status.app_strength

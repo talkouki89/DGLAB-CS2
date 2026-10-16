@@ -1,5 +1,7 @@
 # DGLAB-CS2
 
+<img src="assets/icon.png" alt="" width="84" align="left" hspace="16" vspace="6">
+
 **讓 CS2 的血量直接決定郊狼的電擊強度。**
 
 ![平台](https://img.shields.io/badge/platform-Windows-0078d4)
@@ -7,6 +9,8 @@
 ![授權](https://img.shields.io/badge/license-GPL--3.0-blue)
 ![測試](https://img.shields.io/badge/tests-539%20passing-success)
 ![裝置](https://img.shields.io/badge/device-DG--LAB%20Coyote%20V3-critical)
+
+<br clear="left">
 
 透過 **DG-LAB Socket 開放接口**連線：程式連上中繼伺服器後取得一組配對 ID，
 把它畫成 QR code，你用 DG-LAB App 掃一下就連上了 —— **完全不需要藍牙**，
@@ -199,6 +203,7 @@ VAC 抓的是**作弊程式的特徵**（記憶體裡的已知作弊碼）與伺
 | 啟動前 GSI 檢查 | 沒裝好就不顯示 QR code，並列出搶同一個埠的其他 cfg |
 | 參數存回 `config.toml` | 保留註解地就地改寫，並自動備份 |
 | Discord Rich Presence | 顯示目前強度與遊玩狀態，可選圖片、可開關 |
+| 深色主題 | 狀態用顏色說話：青＝電、粉＝血量、橘＝燃燒，強度越接近上限越警示 |
 | 事件紀錄 | 畫面上即時顯示，同時寫進 `dglab-cs2.log` |
 
 ### 品質
@@ -960,6 +965,18 @@ build.ps1                      PyInstaller 打包腳本
 ---
 
 ## 更新記錄
+
+### v3.1.0
+
+**介面**
+
+- 🌙 **深色主題**：整個介面改成深色，青色代表「電」、粉色是血量、橘色是燃燒；
+  強度數字放大，而且越接近上限顏色越警示（青 → 琥珀 → 紅）
+- 🟢 連線狀態燈號加上緩慢的呼吸效果，一眼看得出程式還活著
+- 🖼️ **程式圖示**：深色圓角底 + 霓虹閃電 + 心跳線，exe 與視窗都有
+- 修正深色主題下自製對話框的樣式：文字框／清單原本還是白的，
+  而且對話框邊緣會露出系統預設的淺灰色
+- 修正參數標籤被裁掉（Tk 的寬度單位是「平均字元寬」，中文比它寬）
 
 ### v3.0.1
 

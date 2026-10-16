@@ -174,3 +174,6 @@ config.toml.bak
 
 # 開發時隨手截的圖
 shot*.png
+
+# 圖示的尺寸預覽（用 tools/make_icon.py 產生）
+assets/icon-preview.png

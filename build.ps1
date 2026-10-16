@@ -41,6 +41,10 @@ $common = @(
     "--noconfirm",
     "--clean",
     "--name", "DGLAB-CS2",
+    # exe 的圖示（檔案總管／工作列看到的）
+    "--icon", "assets\icon.ico",
+    # 視窗左上角的圖示要另外在執行時載入，所以把 .ico 一起打包進去
+    "--add-data", "assets\icon.ico;assets",
     # websockets 的後端與傳輸實作是動態匯入的，必須明確收集
     "--collect-submodules", "websockets",
     "--hidden-import", "websockets.asyncio.client",
