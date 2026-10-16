@@ -15,6 +15,7 @@ import re
 import shutil
 from dataclasses import dataclass
 import logging
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -327,6 +328,35 @@ def _safe_backup(target: Path, backup: Path) -> Path | None:
     return backup
 
 
+#: 寫入失敗時總共試幾次、每次間隔多久（秒）
+WRITE_ATTEMPTS = 4
+WRITE_RETRY_DELAY = 0.35
+
+
+def _write_with_retry(path: Path, text: str) -> None:
+    """寫入檔案，遇到「被鎖住」時重試幾次。
+
+    `game\\csgo\\cfg` 是 Steam Cloud 會同步的資料夾，Steam 開著的時候
+    檔案可能被短暫鎖住，這時 Windows 會回 `Permission denied`
+    （其實是 sharing violation，不是真的沒權限）。這種錯誤通常等一下就好，
+    所以重試比直接失敗有用。真的沒權限時最後一次仍會拋出，交由呼叫端處理。
+    """
+    last: OSError | None = None
+    for attempt in range(WRITE_ATTEMPTS):
+        try:
+            path.write_text(text, encoding="utf-8")
+            return
+        except PermissionError as exc:
+            last = exc
+            if attempt < WRITE_ATTEMPTS - 1:
+                logger.debug(
+                    "寫入 %s 被拒絕（第 %d 次），稍後重試：%s", path, attempt + 1, exc
+                )
+                time.sleep(WRITE_RETRY_DELAY)
+    if last is not None:
+        raise last
+
+
 def install_cfg(
     directory: str | Path,
     *,
@@ -355,8 +385,16 @@ def install_cfg(
         backup = target.with_suffix(target.suffix + ".bak")
         backup = _safe_backup(target, backup)
 
-    target.write_text(
-        build_cfg_text(host, port, token, heartbeat=heartbeat), encoding="utf-8"
+    # 目標檔本身可能是唯讀的（例如權限被 copy2 複製過，或使用者手動設過），
+    # 那就會直接 Permission denied。先清掉再寫。
+    try:
+        if target.exists():
+            target.chmod(0o666)
+    except OSError:
+        pass
+
+    _write_with_retry(
+        target, build_cfg_text(host, port, token, heartbeat=heartbeat)
     )
     return InstallResult(
         path=target, created=created, backup=backup, conflicts=conflicts
