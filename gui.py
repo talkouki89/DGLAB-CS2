@@ -1239,7 +1239,11 @@ class ScrollableFrame(ttk.Frame):
 
     def __init__(self, parent: tk.Widget, *, height: int = 280, **kwargs) -> None:
         super().__init__(parent, **kwargs)
-        self.canvas = tk.Canvas(self, height=height, highlightthickness=0)
+        # Canvas 一定要自己設背景色：內容比可視範圍短的時候，下面那塊空白
+        # 就是 canvas 自己的底色，不設的話會是系統預設的白色。
+        self.canvas = tk.Canvas(
+            self, height=height, background=SURFACE, highlightthickness=0
+        )
         self.scrollbar = ttk.Scrollbar(
             self, orient="vertical", command=self.canvas.yview
         )
@@ -1754,17 +1758,17 @@ class DglabApp:
         bar = ttk.Frame(self.root, padding=(12, 10, 12, 0))
         bar.grid(row=1, column=0, sticky="ew")
 
-        self.start_button = ttk.Button(bar, text="\u25b6 開始", command=self._on_start, width=10)
+        self.start_button = ttk.Button(bar, text="\u25b6 開始", command=self._on_start, width=8)
         self.start_button.grid(row=0, column=0, padx=(0, 6))
         self.pause_button = ttk.Button(
-            bar, text="\u23f8 暫停並歸零", command=self._on_pause, width=14, state="disabled"
+            bar, text="\u23f8 暫停並歸零", command=self._on_pause, width=12, state="disabled"
         )
         self.pause_button.grid(row=0, column=1, padx=6)
         self.stop_button = ttk.Button(
-            bar, text="\u23f9 結束", command=self._on_stop, width=9, state="disabled"
+            bar, text="\u23f9 結束", command=self._on_stop, width=8, state="disabled"
         )
         self.stop_button.grid(row=0, column=2, padx=6)
-        ttk.Button(bar, text="疊加歸零", command=self._on_reset_stack, width=9).grid(
+        ttk.Button(bar, text="疊加歸零", command=self._on_reset_stack, width=8).grid(
             row=0, column=3, padx=6
         )
         self.dry_run_var = tk.BooleanVar(value=self.dry_run)
@@ -1786,21 +1790,24 @@ class DglabApp:
 
         ttk.Separator(bar, orient="vertical").grid(row=0, column=5, sticky="ns", padx=6)
         ttk.Button(
-            bar, text="\u2699 安裝 GSI 設定", command=self._on_install_cfg, width=17
+            bar, text="\u2699 安裝 GSI 設定", command=self._on_install_cfg, width=15
         ).grid(row=0, column=6, padx=(0, 6))
         ttk.Button(
-            bar, text="? 使用教學", command=self._show_tutorial, width=11
+            bar, text="? 使用教學", command=self._show_tutorial, width=10
         ).grid(row=0, column=7, padx=(0, 6))
         ttk.Button(
             bar,
             text="GitHub",
             command=lambda: webbrowser.open(PROJECT_URL),
-            width=9,
+            width=8,
         ).grid(row=0, column=8)
+        ttk.Button(
+            bar, text="\u2328 熱鍵", command=self._show_hotkey_tab, width=8
+        ).grid(row=0, column=9, padx=(6, 0))
 
         # 有新版本時才顯示（沒有就 grid_remove，完全不佔高度）
         self.update_banner = ttk.Frame(bar)
-        self.update_banner.grid(row=1, column=0, columnspan=9, sticky="ew", pady=(8, 0))
+        self.update_banner.grid(row=1, column=0, columnspan=10, sticky="ew", pady=(8, 0))
         self.update_banner.grid_remove()
 
     def _build_settings(self, parent: ttk.Frame) -> None:
@@ -2049,6 +2056,16 @@ class DglabApp:
         if state & 0x0040:
             modifiers |= MOD_WIN
         return modifiers, vk
+
+    def _show_hotkey_tab(self) -> None:
+        """切到「熱鍵」分頁 —— 按鈕列那顆 ⌨ 熱鍵 用。"""
+        if not hasattr(self, "notebook"):
+            return
+        for index in range(self.notebook.index("end")):
+            if self.notebook.tab(index, "text") == "熱鍵":
+                self.notebook.select(index)
+                self.notebook.focus_set()
+                return
 
     def _record_hotkey(self, key: str) -> None:
         """開一個小視窗，讓使用者直接按組合鍵。"""
