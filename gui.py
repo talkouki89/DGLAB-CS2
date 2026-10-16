@@ -127,6 +127,8 @@ TEXT_DIM = "#8a8aa8"
 ACCENT = "#22d3ee"      # 青：電
 ACCENT_DARK = "#0b3b47"
 PINK = "#f472b6"        # 血量
+#: 唯讀／停用狀態的文字（比 TEXT 暗一點，但仍看得清楚）
+TEXT_SOFT = "#b4b4d0"
 ORANGE = "#fb923c"      # 燃燒
 
 #: 狀態燈號顏色
@@ -1799,17 +1801,17 @@ class DglabApp:
         bar = ttk.Frame(self.root, padding=(12, 10, 12, 0))
         bar.grid(row=1, column=0, sticky="ew")
 
-        self.start_button = ttk.Button(bar, text="\u25b6 開始", command=self._on_start, width=8)
+        self.start_button = ttk.Button(bar, text="\u25b6 開始", command=self._on_start, width=9)
         self.start_button.grid(row=0, column=0, padx=(0, 6))
         self.pause_button = ttk.Button(
-            bar, text="\u23f8 暫停並歸零", command=self._on_pause, width=12, state="disabled"
+            bar, text="\u23f8 暫停並歸零", command=self._on_pause, width=13, state="disabled"
         )
         self.pause_button.grid(row=0, column=1, padx=6)
         self.stop_button = ttk.Button(
-            bar, text="\u23f9 結束", command=self._on_stop, width=8, state="disabled"
+            bar, text="\u23f9 結束", command=self._on_stop, width=9, state="disabled"
         )
         self.stop_button.grid(row=0, column=2, padx=6)
-        ttk.Button(bar, text="疊加歸零", command=self._on_reset_stack, width=8).grid(
+        ttk.Button(bar, text="疊加歸零", command=self._on_reset_stack, width=9).grid(
             row=0, column=3, padx=6
         )
         self.dry_run_var = tk.BooleanVar(value=self.dry_run)
@@ -1831,10 +1833,10 @@ class DglabApp:
 
         ttk.Separator(bar, orient="vertical").grid(row=0, column=5, sticky="ns", padx=6)
         ttk.Button(
-            bar, text="\u2699 安裝 GSI 設定", command=self._on_install_cfg, width=13
+            bar, text="\u2699 安裝 GSI 設定", command=self._on_install_cfg, width=15
         ).grid(row=0, column=6, padx=(0, 6))
         ttk.Button(
-            bar, text="? 使用教學", command=self._show_tutorial, width=10
+            bar, text="? 使用教學", command=self._show_tutorial, width=11
         ).grid(row=0, column=7, padx=(0, 6))
         ttk.Button(
             bar,
@@ -1843,15 +1845,12 @@ class DglabApp:
             width=8,
         ).grid(row=0, column=8)
         ttk.Button(
-            bar, text="\u2328 熱鍵", command=self._show_hotkey_tab, width=7
+            bar, text="\U0001f310 監看", command=self._open_dashboard, width=8
         ).grid(row=0, column=9, padx=(6, 0))
-        ttk.Button(
-            bar, text="\U0001f310 監看", command=self._open_dashboard, width=7
-        ).grid(row=0, column=10, padx=(6, 0))
 
         # 有新版本時才顯示（沒有就 grid_remove，完全不佔高度）
         self.update_banner = ttk.Frame(bar)
-        self.update_banner.grid(row=1, column=0, columnspan=11, sticky="ew", pady=(8, 0))
+        self.update_banner.grid(row=1, column=0, columnspan=10, sticky="ew", pady=(8, 0))
         self.update_banner.grid_remove()
 
     def _build_settings(self, parent: ttk.Frame) -> None:
@@ -1955,6 +1954,10 @@ class DglabApp:
                 self.vars["__widget__" + field.key] = entry
             elif field.kind == "text" and field.key == "wave_custom":
                 var = tk.StringVar()
+                # disabledbackground / disabledforeground 一定要一起設：
+                # _sync_wave_hint() 會在 preset != custom 時把這個框設成
+                # state="disabled"，而 Tk 的停用狀態會用**系統的**淺色
+                # 蓋掉上面設的深色，變成「淺灰底＋看不見的字」。
                 box = tk.Text(
                     tab,
                     height=4,
@@ -2572,6 +2575,43 @@ class DglabApp:
         # 按鈕狀態交給 _tick 依引擎實際狀態更新
         self._append_log("引擎啟動中…（要停止請按「⏹ 結束」）", "info")
 
+    @staticmethod
+    def _gsi_needs_refresh(check: cs2cfg.GsiCheck) -> bool:
+        """判斷「已經裝了、但內容要更新」——這種情況不問使用者，直接覆蓋。
+
+        只有真的存在一個以上的設定檔時才算；完全沒裝的話還是要問，
+        因為那需要選資料夾。
+        """
+        return bool(
+            check.installed or check.mismatched or check.conflicts or check.missing_data
+        )
+
+    def _refresh_installed_gsi(
+        self, config: AppConfig, check: cs2cfg.GsiCheck
+    ) -> bool:
+        """把已經存在的 GSI 設定檔覆蓋成目前設定（不跳任何對話框）。
+
+        會覆蓋「我們的檔案」所在的目錄；如果只有別人的檔案指向同一個埠，
+        也會在那些目錄補上我們的檔案，讓設定一致。
+        """
+        targets: list[Path] = []
+        for entry in (check.installed, *check.mismatched, *check.conflicts):
+            if entry is None:
+                continue
+            parent = Path(entry.path).parent
+            if parent not in targets:
+                targets.append(parent)
+        if not targets:
+            return False
+
+        ok = True
+        for directory in targets:
+            if self._install_cfg_for(config, directory, confirm=False):
+                self._append_log(f"已自動更新 GSI 設定：{directory}", "success")
+            else:
+                ok = False
+        return ok
+
     def _passes_gsi_check(self, config: AppConfig) -> bool:
         """啟動前的把關：GSI 沒裝好就不顯示 QR code。
 
@@ -2584,6 +2624,19 @@ class DglabApp:
             return True
 
         self._append_log(f"GSI 檢查未通過：{check.summary}", "warning")
+
+        # 已經裝過、只是設定不一致（或是有別的 cfg 搶同一個埠、缺少資料區塊）
+        # → 直接覆蓋成目前設定，不要問。使用者要求「裝過就自動更新成新版」。
+        # 只有「完全沒裝」才需要問，因為那要選資料夾。
+        if self._gsi_needs_refresh(check):
+            if self._refresh_installed_gsi(config, check):
+                check = self._refresh_gsi_check(config)
+                self._update_gsi_status(check)
+                if check.ok:
+                    return True
+            else:
+                self._append_log("自動更新 GSI 設定失敗，改用詢問方式", "warning")
+
         decision = self._ask_about_missing_gsi(check)
         if decision == "cancel":
             self._append_log("已取消啟動（GSI 設定還沒安裝）", "info")
@@ -3502,9 +3555,12 @@ class DglabApp:
             return
         var = self.vars.get("wave_preset")
         enabled = str(var.get()) == "custom" if isinstance(var, tk.StringVar) else False
+        # 顏色要跟著深色主題走。這裡以前是寫死的 "white" / "#f0f0f0"
+        # （淺色主題留下來的），配上深色主題的近白文字就變成白底白字。
         widget.configure(
             state="normal" if enabled else "disabled",
-            background="white" if enabled else "#f0f0f0",
+            background=SURFACE if enabled else SURFACE2,
+            foreground=TEXT if enabled else TEXT_SOFT,
         )
 
 

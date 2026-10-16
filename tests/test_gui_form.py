@@ -11,6 +11,7 @@ from config import load_config
 from coyote.socket_protocol import Channel
 from coyote.waveform import PRESET_NAMES
 from gui import (
+    DglabApp,
     FIELDS,
     FIELD_BY_KEY,
     TAB_ORDER,
@@ -61,6 +62,43 @@ class FormRoundTripTests(unittest.TestCase):
         )
         # TAB_ORDER 決定分頁順序，每個分頁都必須真的有欄位
         self.assertEqual(set(TAB_ORDER), tabs)
+
+    def test_gsi_needs_refresh_only_when_something_is_installed(self):
+        """「已安裝但設定不一致」要自動覆蓋；「完全沒裝」還是要問。"""
+        from pathlib import Path as _Path
+
+        import cs2cfg
+
+        nothing = cs2cfg.GsiCheck(ok=False, summary="未安裝", directories=[_Path("C:/nope")])
+        self.assertFalse(DglabApp._gsi_needs_refresh(nothing))
+
+        mismatched = cs2cfg.GsiCheck(
+            ok=False,
+            summary="設定不一致",
+            directories=[_Path("C:/game/csgo/cfg")],
+            mismatched=[
+                cs2cfg.InstalledCfg(path=_Path("C:/game/csgo/cfg") / cs2cfg.CFG_FILENAME)
+            ],
+        )
+        self.assertTrue(DglabApp._gsi_needs_refresh(mismatched))
+
+        conflicting = cs2cfg.GsiCheck(
+            ok=False,
+            summary="有衝突",
+            directories=[_Path("C:/game/csgo/cfg")],
+            conflicts=[
+                cs2cfg.InstalledCfg(path=_Path("C:/game/csgo/cfg/other.cfg"))
+            ],
+        )
+        self.assertTrue(DglabApp._gsi_needs_refresh(conflicting))
+
+        missing = cs2cfg.GsiCheck(
+            ok=False,
+            summary="缺資料區塊",
+            directories=[_Path("C:/game/csgo/cfg")],
+            missing_data=("player_state",),
+        )
+        self.assertTrue(DglabApp._gsi_needs_refresh(missing))
 
     def test_discord_round_trip(self):
         config = config_from_form(
