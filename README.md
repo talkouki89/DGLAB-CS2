@@ -7,7 +7,7 @@
 ![平台](https://img.shields.io/badge/platform-Windows-0078d4)
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776ab)
 ![授權](https://img.shields.io/badge/license-GPL--3.0-blue)
-![測試](https://img.shields.io/badge/tests-696%20passing-success)
+![測試](https://img.shields.io/badge/tests-713%20passing-success)
 ![裝置](https://img.shields.io/badge/device-DG--LAB%20Coyote%20V3-critical)
 
 <br clear="left">
@@ -62,6 +62,12 @@ python main_gui.py
   <img src="docs/screenshot-stats.png" alt="本場統計" width="720">
 </p>
 
+**監看網頁**（直播用）—— 按鈕列的「🌐 監看」會直接開好：
+
+<p align="center">
+  <img src="docs/screenshot-dashboard.png" alt="監看頁面" width="720">
+</p>
+
 **全域熱鍵**：在「熱鍵」分頁按「錄製」，直接按下想用的組合鍵就好。
 預設是 `Ctrl+Alt+S` 緊急停止（歸零並暫停）、`Ctrl+Alt+P` 暫停／繼續。
 這兩個**在 CS2 全螢幕時也有效**。
@@ -99,7 +105,7 @@ python main_gui.py
 - [使用（命令列版）](#使用命令列版)
 - [命令列選項](#命令列選項)
 - [設定說明（`config.toml`）](#設定說明configtoml)
-- [全域熱鍵](#新功能v320) ／ [波形編輯器](#新功能v320) ／ [本場統計](#新功能v320)
+- [全域熱鍵](#新功能v320) ／ [波形編輯器](#新功能v320) ／ [本場統計](#新功能v320) ／ [監看網頁](#新功能v320)
 - [波形是怎麼運作的](#波形是怎麼運作的)
 - [打包成 exe](#打包成-exe)
 - [測試](#測試)
@@ -229,6 +235,7 @@ VAC 抓的是**作弊程式的特徵**（記憶體裡的已知作弊碼）與伺
 | 本場統計 | 擊殺／死亡、K/D、最佳連殺、平均強度、通電時間… |
 | 強度歷程圖 | 即時折線圖，強度與血量畫在一起 |
 | 自動檢查更新 | 啟動時問 GitHub 有沒有新版本，有新版本會顯示提示條 |
+| 監看網頁 | 唯讀的即時狀態頁面，直播時可以讓觀眾看；附 OBS 透明疊層 |
 | 事件紀錄 | 畫面上即時顯示，同時寫進 `dglab-cs2.log` |
 
 ### 品質
@@ -236,7 +243,7 @@ VAC 抓的是**作弊程式的特徵**（記憶體裡的已知作弊碼）與伺
 | 功能 | 說明 |
 |---|---|
 | 事件驅動控制迴圈 | 受擊到電下去約 **2ms**（見[反應速度](#反應速度)） |
-| 完全離線的測試套件 | **696 項**，不需要網路、App、郊狼或 CS2 |
+| 完全離線的測試套件 | **713 項**，不需要網路、App、郊狼或 CS2 |
 | 命令列版本 | 要寫自動化腳本時可以用 `main.py` |
 
 ---
@@ -982,7 +989,7 @@ coyote/socket_client.py        配對、強度指令、波形串流
 coyote/transport.py            WebSocket 傳輸層（含 dry-run 用的假傳輸層）
 coyote/waveform.py             波形換算、預設集、8 bytes 波形單位
 coyote/qr.py                   QR code 繪製（終端機 + PNG）
-tests/                         離線測試套件（696 項，不需要網路／App／裝置）
+tests/                         離線測試套件（713 項，不需要網路／App／裝置）
 docs/                          README 用的截圖
 build.ps1                      PyInstaller 打包腳本
 ```
@@ -1095,7 +1102,7 @@ python -m unittest discover -s tests -t . -v
 
 測試套件**完全離線**，不需要網路、DG-LAB App、郊狼或 CS2
 ——用假的 WebSocket 傳輸層扮演服務端與 App，用真的 HTTP POST 打自己的 GSI 伺服器。
-通過標準是 696 項全過（有 2 項會在缺少 `qrcode` 時跳過）。
+通過標準是 713 項全過（有 2 項會在缺少 `qrcode` 時跳過）。
 
 設計上刻意把邏輯與 I/O 分開，所以大多數規則都是純函式、可以直接測：
 
