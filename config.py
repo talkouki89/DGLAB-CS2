@@ -260,6 +260,32 @@ class HotkeyConfig:
 
 
 @dataclass(frozen=True)
+class DashboardConfig:
+    """給別人看的即時狀態網頁（直播用）。
+
+    這是一個**唯讀**的伺服器，跟收 GSI 資料的那個埠完全分開 ——
+    GSI 埠收的是能改變電擊行為的指令，開放出去等於讓人遙控你的裝置。
+    """
+
+    enabled: bool = False
+    #: 綁定的位址。預設只有自己看得到；要給別人看就改成 "0.0.0.0"
+    host: str = "127.0.0.1"
+    port: int = 8770
+    #: 通關密語（放在網址的 ?token=...）。空字串 = 不檢查
+    token: str = ""
+    #: 網頁重新抓資料的間隔（毫秒）
+    refresh_ms: int = 500
+    #: 網頁標題
+    title: str = "DGLAB-CS2"
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.port <= 65535:
+            raise ValueError("dashboard.port 必須介於 0 ~ 65535")
+        if self.refresh_ms < 100:
+            raise ValueError("dashboard.refresh_ms 不可小於 100")
+
+
+@dataclass(frozen=True)
 class UpdateConfig:
     """自動檢查更新。"""
 
@@ -334,6 +360,7 @@ class AppConfig:
     socket: SocketConfig = field(default_factory=SocketConfig)
     dglab: DglabConfig = field(default_factory=DglabConfig)
     discord: DiscordConfig = field(default_factory=DiscordConfig)
+    dashboard: DashboardConfig = field(default_factory=DashboardConfig)
     hotkeys: HotkeyConfig = field(default_factory=HotkeyConfig)
     update: UpdateConfig = field(default_factory=UpdateConfig)
 
@@ -351,6 +378,7 @@ def parse_config(raw: dict[str, Any]) -> AppConfig:
     socket = _parse_socket(_require_table(raw, "socket"))
     dglab = _parse_dglab(_require_table(raw, "dglab"))
     discord = _parse_discord(_require_table(raw, "discord"))
+    dashboard = _parse_dashboard(raw.get("dashboard", {}))
     hotkeys = _parse_hotkeys(raw.get("hotkeys", {}))
     update = _parse_update(raw.get("update", {}))
     return AppConfig(
@@ -359,6 +387,7 @@ def parse_config(raw: dict[str, Any]) -> AppConfig:
         socket=socket,
         dglab=dglab,
         discord=discord,
+        dashboard=dashboard,
         hotkeys=hotkeys,
         update=update,
     )
@@ -371,6 +400,23 @@ def _optional_table(value: Any, name: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ConfigError(f"[{name}] 必須是一個區塊（table）")
     return value
+
+
+def _parse_dashboard(raw: Any) -> DashboardConfig:
+    table = _optional_table(raw, "dashboard")
+    try:
+        return DashboardConfig(
+            enabled=bool(_get(table, "enabled", False, "dashboard")),
+            host=str(_get(table, "host", "127.0.0.1", "dashboard")).strip(),
+            port=int(_get_number(table, "port", 8770, "dashboard", low=0, high=65535)),
+            token=str(_get(table, "token", "", "dashboard")),
+            refresh_ms=int(
+                _get_number(table, "refresh_ms", 500, "dashboard", low=100, high=60000)
+            ),
+            title=str(_get(table, "title", "DGLAB-CS2", "dashboard")),
+        )
+    except ValueError as exc:
+        raise ConfigError(f"[dashboard] 不合法：{exc}") from None
 
 
 def _parse_hotkeys(raw: Any) -> HotkeyConfig:

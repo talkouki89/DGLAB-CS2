@@ -39,6 +39,7 @@ from config import (
     ConfigError,
     DeathStopConfig,
     DglabConfig,
+    DashboardConfig,
     DiscordConfig,
     GsiConfig,
     HOTKEY_ACTIONS,
@@ -296,6 +297,31 @@ FIELDS: tuple[Field, ...] = (
     Field("熱鍵", "hotkey_toggle_pause", "暫停／繼續", "hotkey", "切換暫停狀態"),
     Field("熱鍵", "hotkey_reset_stack", "疊加歸零", "hotkey", "留空 = 不綁定"),
     # --- 更新 ---
+    # --- 監看 ---
+    Field(
+        "監看",
+        "dashboard_enabled",
+        "啟用監看網頁",
+        "bool",
+        "唯讀的即時狀態網頁，直播時可以讓觀眾看",
+    ),
+    Field(
+        "監看",
+        "dashboard_host",
+        "綁定位址",
+        "text",
+        "127.0.0.1 = 只有自己看得到；0.0.0.0 = 同網路的人都連得到",
+    ),
+    Field("監看", "dashboard_port", "連接埠", "int", "預設 8770，和 GSI 的 3000 無關"),
+    Field(
+        "監看",
+        "dashboard_token",
+        "通關密語",
+        "text",
+        "放在網址的 ?token=…；留空 = 不檢查。要公開時建議設一組",
+    ),
+    Field("監看", "dashboard_refresh_ms", "更新間隔（毫秒）", "int", "越小越即時，500 差不多"),
+    Field("監看", "dashboard_title", "網頁標題", "text", "顯示在瀏覽器分頁上"),
     Field("更新", "update_enabled", "檢查更新", "bool", "啟動時問 GitHub 有沒有新版本"),
     Field("更新", "update_check_on_start", "啟動時檢查", "bool", "只在這一次啟動時檢查"),
     Field(
@@ -378,6 +404,7 @@ TAB_ORDER: tuple[str, ...] = (
     "波形",
     "連線",
     "Discord",
+    "監看",
     "熱鍵",
     "更新",
 )
@@ -422,6 +449,12 @@ def form_values(config: AppConfig) -> dict[str, Any]:
             f"{frequency}, {strength}"
             for frequency, strength in dglab.wave.custom_samples
         ),
+        "dashboard_enabled": config.dashboard.enabled,
+        "dashboard_host": config.dashboard.host,
+        "dashboard_port": config.dashboard.port,
+        "dashboard_token": config.dashboard.token,
+        "dashboard_refresh_ms": config.dashboard.refresh_ms,
+        "dashboard_title": config.dashboard.title,
         "hotkeys_enabled": config.hotkeys.enabled,
         "hotkey_emergency_stop": config.hotkeys.emergency_stop,
         "hotkey_toggle_pause": config.hotkeys.toggle_pause,
@@ -629,6 +662,14 @@ def config_from_form(base: AppConfig, values: dict[str, Any]) -> AppConfig:
             qr_open=boolean("qr_open"),
         ),
         discord=discord,
+        dashboard=DashboardConfig(
+            enabled=boolean("dashboard_enabled"),
+            host=text("dashboard_host") or "127.0.0.1",
+            port=int(number("dashboard_port", int)),
+            token=text("dashboard_token"),
+            refresh_ms=int(number("dashboard_refresh_ms", int)),
+            title=text("dashboard_title") or "DGLAB-CS2",
+        ),
         hotkeys=HotkeyConfig(
             enabled=boolean("hotkeys_enabled"),
             emergency_stop=hotkey_values.get("emergency_stop", ""),
@@ -1952,6 +1993,58 @@ class DglabApp:
             self._fill_discord_tab(tab, row)
         elif tab_name == "波形":
             self._fill_wave_tab(tab, row)
+        elif tab_name == "監看":
+            self._fill_dashboard_tab(tab, row)
+
+    def _fill_dashboard_tab(self, tab: ttk.Frame, row: int) -> None:
+        """監看分頁多一顆「開啟監看頁面」的按鈕，順便顯示目前的網址。"""
+        ttk.Label(tab, text="開啟頁面", anchor="w").grid(
+            row=row, column=0, sticky="w", pady=4, padx=(0, 12)
+        )
+        ttk.Button(
+            tab, text="\U0001f310 開啟監看頁面", command=self._open_dashboard, width=20
+        ).grid(row=row, column=1, sticky="w", pady=4)
+        self.dashboard_hint = ttk.Label(
+            tab,
+            text="",
+            style="Hint.TLabel",
+            justify="left",
+            wraplength=HINT_WRAPLENGTH,
+        )
+        self.dashboard_hint.grid(row=row, column=2, sticky="ew", padx=(14, 0))
+        self.dashboard_hint.bind("<Configure>", self._autowrap_hint)
+
+    def _open_dashboard(self) -> None:
+        """用瀏覽器打開監看頁面。"""
+        url = self.engine.dashboard_url
+        if not url:
+            messagebox.showwarning(
+                "監看頁面沒有啟動",
+                "請先在這個分頁勾選「啟用監看網頁」，\n"
+                "按「套用設定」之後再試一次。\n\n"
+                "（如果剛剛按過套用還是一樣，看一下事件紀錄，"
+                "通常是連接埠被其他程式佔用了。）",
+                parent=self.root,
+            )
+            return
+        webbrowser.open(url)
+        self._append_log(f"已開啟監看頁面：{url}", "success")
+
+    def _update_dashboard_hint(self) -> None:
+        if not hasattr(self, "dashboard_hint"):
+            return
+        if not self.config.dashboard.enabled:
+            self.dashboard_hint.configure(
+                text="未啟用。勾選上面的選項再按「套用設定」就會開始監看"
+            )
+            return
+        url = self.engine.dashboard_url
+        if url:
+            self.dashboard_hint.configure(
+                text=f"目前網址（唯讀）：{url}\nOBS 疊層：{url.rstrip('/')}/overlay"
+            )
+        else:
+            self.dashboard_hint.configure(text="啟動失敗，請看事件紀錄")
 
     def _fill_wave_tab(self, tab: ttk.Frame, row: int) -> None:
         """波形分頁多放一顆「開啟波形編輯器」的按鈕。"""
@@ -3109,6 +3202,7 @@ class DglabApp:
             self._refresh_gsi_check()
         self._update_gsi_status(self._gsi_check)
         self._update_discord_status()
+        self._update_dashboard_hint()
         self._maybe_check_update()
 
         self.root.after(self.POLL_MS, self._tick)

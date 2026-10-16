@@ -57,7 +57,7 @@ class FormRoundTripTests(unittest.TestCase):
         tabs = {field.tab for field in FIELDS}
         self.assertEqual(
             tabs,
-            {"基本", "疊加", "輸出", "波形", "連線", "Discord", "熱鍵", "更新"},
+            {"基本", "疊加", "輸出", "波形", "連線", "Discord", "監看", "熱鍵", "更新"},
         )
         # TAB_ORDER 決定分頁順序，每個分頁都必須真的有欄位
         self.assertEqual(set(TAB_ORDER), tabs)

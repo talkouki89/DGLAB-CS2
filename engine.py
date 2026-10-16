@@ -33,7 +33,13 @@ from coyote import (
     WebsocketsTransport,
     resolve_preset,
 )
+from coyote import __version__ as PROJECT_VERSION
 from coyote import qr as qr_module
+from dashboard import (
+    DashboardOptions,
+    DashboardServer,
+    build_status_payload,
+)
 from engine_status import EngineState, EngineStatus
 from game_events import PlayerSnapshot
 from gsi_server import GSIServer, serve_forever
@@ -162,6 +168,9 @@ class ControlEngine:
         #: 收到 GSI 資料時會被 set，讓控制迴圈立刻醒來（事件驅動）
         self._payload_event: asyncio.Event | None = None
 
+        #: 唯讀的監看網頁伺服器（直播用）；沒開就是 None
+        self._dashboard: DashboardServer | None = None
+
         # Discord 顯示：自己拉狀態，所以不用在控制迴圈裡塞任何東西
         self._presence = DiscordPresence(
             config.discord,
@@ -169,6 +178,7 @@ class ControlEngine:
             on_log=self.log,
         )
         self._presence.configure(config.discord)
+        self.restart_dashboard()
 
     def _presence_view(self) -> PresenceView:
         return build_view(self.status, self._config)
@@ -250,6 +260,52 @@ class ControlEngine:
         thread.join(timeout)
         return not thread.is_alive()
 
+    @property
+    def dashboard_url(self) -> str:
+        """監看頁面的網址（沒開就回傳空字串）。"""
+        if self._dashboard is None or not self._dashboard.running:
+            return ""
+        return self._dashboard.url
+
+    def restart_dashboard(self) -> None:
+        """依照目前設定重新啟動監看伺服器（設定改完會呼叫）。"""
+        if self._dashboard is not None:
+            self._dashboard.stop()
+        self._dashboard = None
+        self._start_dashboard()
+
+    def _start_dashboard(self) -> None:
+        """啟動唯讀的監看網頁伺服器（沒開或失敗都不影響控制）。"""
+        config = self._config.dashboard
+        if not config.enabled:
+            return
+        options = DashboardOptions(
+            enabled=config.enabled,
+            host=config.host,
+            port=config.port,
+            token=config.token,
+            refresh_ms=config.refresh_ms,
+            title=config.title,
+        )
+        self._dashboard = DashboardServer(self._dashboard_payload, options)
+        if self._dashboard.start():
+            self.log(f"監看頁面：{self._dashboard.url}（唯讀，不會洩漏配對連結）")
+        else:
+            self.log(
+                f"無法啟動監看頁面（{config.host}:{config.port}），"
+                "可能是埠被佔用；其餘功能不受影響",
+                "warning",
+            )
+
+    def _dashboard_payload(self) -> dict:
+        """提供給監看頁面的資料（刻意不含配對連結與 token）。"""
+        return build_status_payload(
+            self._status,
+            version=PROJECT_VERSION,
+            wave=describe_wave(self._config),
+            max_strength=int(self._config.dglab.max_strength),
+        )
+
     def shutdown(self) -> None:
         """停止引擎並釋放所有資源（含 Discord 連線）。
 
@@ -258,6 +314,9 @@ class ControlEngine:
         """
         self.stop(timeout=5)
         self._presence.close()
+        if self._dashboard is not None:
+            self._dashboard.stop()
+            self._dashboard = None
 
     # ------------------------------------------------------------ 執行中指令
 
@@ -376,6 +435,8 @@ class ControlEngine:
             self._client = None
             self._server = None
             self._writer = None
+            if self._dashboard is not None:
+                self._dashboard.stop()
             self._payload_event = None
             if self.status.state is not EngineState.ERROR:
                 self._set(

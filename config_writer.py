@@ -113,6 +113,14 @@ def config_values(config: AppConfig) -> dict[str, dict[str, Any]]:
             "small_image": config.discord.small_image,
             "small_text": config.discord.small_text,
         },
+        "dashboard": {
+            "enabled": config.dashboard.enabled,
+            "host": config.dashboard.host,
+            "port": config.dashboard.port,
+            "token": config.dashboard.token,
+            "refresh_ms": config.dashboard.refresh_ms,
+            "title": config.dashboard.title,
+        },
         "hotkeys": {
             "enabled": config.hotkeys.enabled,
             "emergency_stop": config.hotkeys.emergency_stop,
