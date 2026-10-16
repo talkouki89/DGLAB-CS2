@@ -2629,7 +2629,19 @@ class DglabApp:
         # → 直接覆蓋成目前設定，不要問。使用者要求「裝過就自動更新成新版」。
         # 只有「完全沒裝」才需要問，因為那要選資料夾。
         if self._gsi_needs_refresh(check):
-            if self._refresh_installed_gsi(config, check):
+            # 外層再包一層 try：這段是在 tkinter 的 after 回呼裡跑的，
+            # 丟出例外會被 Tk 的 report_callback_exception 吃掉（--windowed
+            # 的 exe 沒有主控台，等於完全看不到原因）。寧可留下紀錄、
+            # 退回原本的詢問流程，也不要讓「自動更新」無聲無息地沒生效。
+            try:
+                refreshed = self._refresh_installed_gsi(config, check)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("自動更新 GSI 設定時發生例外")
+                self._append_log(
+                    f"自動更新 GSI 設定時發生例外：{exc!r}", "error"
+                )
+                refreshed = False
+            if refreshed:
                 check = self._refresh_gsi_check(config)
                 self._update_gsi_status(check)
                 if check.ok:

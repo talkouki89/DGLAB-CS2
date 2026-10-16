@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -419,3 +420,44 @@ class TutorialTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SafeBackupTests(unittest.TestCase):
+    """備份失敗不該讓安裝失敗。
+
+    使用者實際遇到的狀況：[Errno 13] Permission denied 發生在
+    ``.bak`` 這個路徑上，導致後面的 cfg 根本沒被寫進去。
+    """
+
+    def test_install_succeeds_when_backup_is_read_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "cfg"
+            folder.mkdir()
+            cs2cfg.install_cfg(folder, port=9999, token="OLD")
+            # 第二次安裝才會產生 .bak（第一次是「新建」，沒有東西要備份）
+            cs2cfg.install_cfg(folder, port=8888, token="OLD")
+            backup = folder / (cs2cfg.CFG_FILENAME + ".bak")
+            self.assertTrue(backup.exists())
+            backup.chmod(0o444)  # 唯讀，模擬被鎖住／有唯讀屬性的舊備份
+
+            result = cs2cfg.install_cfg(folder, port=3000, token="DGLAB")
+
+            self.assertEqual(result.path.name, cs2cfg.CFG_FILENAME)
+            text = result.path.read_text(encoding="utf-8")
+            self.assertIn("3000", text)
+            self.assertNotIn("9999", text)
+
+    def test_backup_is_created_normally(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "cfg"
+            folder.mkdir()
+            first = cs2cfg.install_cfg(folder, port=9999, token="OLD")
+            self.assertTrue(first.created)
+
+            second = cs2cfg.install_cfg(folder, port=3000, token="DGLAB")
+
+            self.assertFalse(second.created)
+            self.assertIsNotNone(second.backup)
+            self.assertTrue(second.backup.exists())
+            self.assertIn("9999", second.backup.read_text(encoding="utf-8"))
+

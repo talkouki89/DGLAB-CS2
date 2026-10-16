@@ -14,7 +14,10 @@ from __future__ import annotations
 import re
 import shutil
 from dataclasses import dataclass
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 #: 我們自己安裝的檔名
 CFG_FILENAME = "gamestate_integration_dglab.cfg"
@@ -299,6 +302,31 @@ class InstallResult:
     conflicts: tuple[InstalledCfg, ...]
 
 
+def _safe_backup(target: Path, backup: Path) -> Path | None:
+    """把舊的設定檔備份起來；失敗時回傳 ``None`` 而不是讓安裝整個失敗。
+
+    備份只是「出事可以還原」的方便功能，不該擋住真正重要的事（把新的
+    cfg 寫進去）。實際上就踩過這個坑：舊的 ``.bak`` 被其他程式鎖住或帶有
+    唯讀屬性時，``shutil.copy2`` 會丟出 ``PermissionError``，使用者看到的
+    是「安裝失敗」——但其實只要跳過備份就能裝好。
+
+    會先嘗試清掉目的檔的唯讀屬性再複製。
+    """
+    try:
+        if backup.exists():
+            # 舊的備份可能是唯讀的（copy2 會連權限一起複製過來）
+            backup.chmod(0o666)
+    except OSError:
+        pass
+
+    try:
+        shutil.copy2(target, backup)
+    except OSError as exc:
+        logger.warning("無法備份舊的 GSI 設定（%s）：%s；仍會繼續安裝", backup, exc)
+        return None
+    return backup
+
+
 def install_cfg(
     directory: str | Path,
     *,
@@ -325,7 +353,7 @@ def install_cfg(
     created = not target.exists()
     if not created:
         backup = target.with_suffix(target.suffix + ".bak")
-        shutil.copy2(target, backup)
+        backup = _safe_backup(target, backup)
 
     target.write_text(
         build_cfg_text(host, port, token, heartbeat=heartbeat), encoding="utf-8"
