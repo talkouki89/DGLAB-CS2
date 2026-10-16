@@ -1831,7 +1831,7 @@ class DglabApp:
 
         ttk.Separator(bar, orient="vertical").grid(row=0, column=5, sticky="ns", padx=6)
         ttk.Button(
-            bar, text="\u2699 安裝 GSI 設定", command=self._on_install_cfg, width=15
+            bar, text="\u2699 安裝 GSI 設定", command=self._on_install_cfg, width=13
         ).grid(row=0, column=6, padx=(0, 6))
         ttk.Button(
             bar, text="? 使用教學", command=self._show_tutorial, width=10
@@ -1843,12 +1843,15 @@ class DglabApp:
             width=8,
         ).grid(row=0, column=8)
         ttk.Button(
-            bar, text="\u2328 熱鍵", command=self._show_hotkey_tab, width=8
+            bar, text="\u2328 熱鍵", command=self._show_hotkey_tab, width=7
         ).grid(row=0, column=9, padx=(6, 0))
+        ttk.Button(
+            bar, text="\U0001f310 監看", command=self._open_dashboard, width=7
+        ).grid(row=0, column=10, padx=(6, 0))
 
         # 有新版本時才顯示（沒有就 grid_remove，完全不佔高度）
         self.update_banner = ttk.Frame(bar)
-        self.update_banner.grid(row=1, column=0, columnspan=10, sticky="ew", pady=(8, 0))
+        self.update_banner.grid(row=1, column=0, columnspan=11, sticky="ew", pady=(8, 0))
         self.update_banner.grid_remove()
 
     def _build_settings(self, parent: ttk.Frame) -> None:
@@ -2015,15 +2018,36 @@ class DglabApp:
         self.dashboard_hint.bind("<Configure>", self._autowrap_hint)
 
     def _open_dashboard(self) -> None:
-        """用瀏覽器打開監看頁面。"""
+        """用瀏覽器打開監看頁面。
+
+        還沒啟用的話會直接問「要不要現在開」，回答是就用目前表單上的設定
+        套用一次並啟動 —— 不必自己先去別的分頁勾選再回來按。
+        """
+        if not self.engine.dashboard_url:
+            wanted = self.vars.get("dashboard_enabled")
+            enabled = bool(wanted.get()) if isinstance(wanted, tk.BooleanVar) else False
+            if not enabled:
+                if not messagebox.askyesno(
+                    "啟用監看網頁",
+                    "監看網頁還沒啟用。\n\n"
+                    "要現在用「監看」分頁目前的設定啟用嗎？\n"
+                    "（唯讀頁面，不會洩漏配對連結）",
+                    parent=self.root,
+                ):
+                    return
+                if isinstance(wanted, tk.BooleanVar):
+                    wanted.set(True)
+            # 不論是「剛勾的」還是「勾了但還沒套用」，都先套用一次
+            self._on_apply()
+
         url = self.engine.dashboard_url
         if not url:
-            messagebox.showwarning(
-                "監看頁面沒有啟動",
-                "請先在這個分頁勾選「啟用監看網頁」，\n"
-                "按「套用設定」之後再試一次。\n\n"
-                "（如果剛剛按過套用還是一樣，看一下事件紀錄，"
-                "通常是連接埠被其他程式佔用了。）",
+            messagebox.showerror(
+                "監看頁面啟動失敗",
+                "設定已經套用，但伺服器起不來。\n\n"
+                "最常見的原因是連接埠被其他程式佔用"
+                f"（目前是 {self.vars['dashboard_port'].get()}），\n"
+                "改成別的號碼再試一次。事件紀錄裡有詳細原因。",
                 parent=self.root,
             )
             return

@@ -373,6 +373,8 @@ class ControlEngine:
         self._presence.configure(config.discord)
         if self._writer is not None:
             self._writer.apply_config(config)
+        # 監看頁面的設定（開關、埠、密語）改了要重新套用
+        self.restart_dashboard()
         frames = config.dglab.wave.build_frames()
         client = self._client
         if client is not None:
